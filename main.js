@@ -10,32 +10,65 @@ app.use(cors({
 const BASE_URL = "https://s13.nontonanimeid.boats";
 
 
+// Tambah di atas, ganti axiosInstance lama
+const USER_AGENTS = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+];
+
+function randomUA() {
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+}
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
 const axiosInstance = axios.create({
   timeout: 15000,
   headers: {
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-    "Accept":
-      "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
-    "Referer": BASE_URL + "/",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
   },
 });
 
 async function fetchRetry(url, options = {}, retries = 3) {
   try {
-    return await axiosInstance.get(url, options);
+    const ua = randomUA();
+    return await axiosInstance.get(url, {
+      ...options,
+      headers: {
+        ...options.headers,
+        "User-Agent": ua,
+        "Referer": BASE_URL + "/",
+      },
+    });
   } catch (err) {
+    if (err.response?.status === 403) {
+      console.log(`⚠️ 403 di ${url}, tunggu lalu retry...`);
+      if (retries > 0) {
+        await sleep(3000 + Math.random() * 2000); // tunggu 3-5 detik
+        return fetchRetry(url, options, retries - 1);
+      }
+    }
     if (retries > 0) {
       console.log("🔁 Retry:", url);
-      await new Promise(r => setTimeout(r, 1000));
+      await sleep(1000);
       return fetchRetry(url, options, retries - 1);
     }
     throw err;
   }
 }
-
 const cache = new Map();
 
 function setCache(key, data, ttl = 60) {
