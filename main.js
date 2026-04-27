@@ -4,13 +4,11 @@ const express = require("express");
 const app = express();
 const cors = require("cors");
 const PORT = process.env.PORT || 3012;
-app.use(cors({
-  origin: "*",
-}));
+
+app.use(cors({ origin: "*" }));
+
 const BASE_URL = "https://s13.nontonanimeid.boats";
 
-
-// Tambah di atas, ganti axiosInstance lama
 const USER_AGENTS = [
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
@@ -26,165 +24,108 @@ function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
+// ✅ FIX 1: Timeout lebih pendek (8 detik)
 const axiosInstance = axios.create({
-  timeout: 15000,
+  timeout: 8000,
   headers: {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Cache-Control": "max-age=0",
   },
 });
 
-async function fetchRetry(url, options = {}, retries = 3) {
+// ✅ FIX 2: Retry lebih cepat, delay lebih pendek
+async function fetchRetry(url, options = {}, retries = 2) {
   try {
-    const ua = randomUA();
     return await axiosInstance.get(url, {
       ...options,
       headers: {
         ...options.headers,
-        "User-Agent": ua,
+        "User-Agent": randomUA(),
         "Referer": BASE_URL + "/",
       },
     });
   } catch (err) {
-    if (err.response?.status === 403) {
-      console.log(`⚠️ 403 di ${url}, tunggu lalu retry...`);
-      if (retries > 0) {
-        await sleep(3000 + Math.random() * 2000); // tunggu 3-5 detik
-        return fetchRetry(url, options, retries - 1);
-      }
-    }
-    if (retries > 0) {
-      console.log("🔁 Retry:", url);
-      await sleep(1000);
-      return fetchRetry(url, options, retries - 1);
-    }
-    throw err;
+    if (retries <= 0) throw err;
+
+    const delay = err.response?.status === 403 ? 1500 : 500;
+    console.log(`🔁 Retry (${retries} left) [${err.response?.status || err.code}]: ${url}`);
+    await sleep(delay);
+    return fetchRetry(url, options, retries - 1);
   }
 }
+
+// ✅ FIX 3: Cache pakai key yang benar per slug
 const cache = new Map();
 
-function setCache(key, data, ttl = 60) {
-  cache.set(key, {
-    data,
-    expire: Date.now() + ttl * 1000,
-  });
+function setCache(key, data, ttl = 300) {
+  cache.set(key, { data, expire: Date.now() + ttl * 1000 });
 }
 
 function getCache(key) {
   const item = cache.get(key);
   if (!item) return null;
-  if (Date.now() > item.expire) {
-    cache.delete(key);
-    return null;
-  }
+  if (Date.now() > item.expire) { cache.delete(key); return null; }
   return item.data;
 }
-// Helper: build full URL from slug
-// Helper: build full URL from slug
-function buildUrl(slug) {
-  return `${BASE_URL}/${slug}/`;
-}
 
+// ================= HELPERS =================
 const extractSlug = (href) => {
   if (!href) return "";
   return href.replace(/\/$/, "").split("/").pop();
 };
- 
-// Helper: build anime detail URL from slug
-function buildAnimeUrl(slug) {
-  return `${BASE_URL}/anime/${slug}/`;
-}
 
-// ================= SCRAPER: ONGOING LIST =================
+function buildUrl(slug) { return `${BASE_URL}/${slug}/`; }
+function buildAnimeUrl(slug) { return `${BASE_URL}/anime/${slug}/`; }
+
+// ================= SCRAPER: ONGOING =================
 async function scrapeNontonAnimeOngoing() {
   try {
-    const url = `${BASE_URL}/ongoing-list/`;
-    const res = await fetchRetry(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-        Referer: BASE_URL + "/",
-      },
-    });
- 
+    const res = await fetchRetry(`${BASE_URL}/ongoing-list/`);
     const $ = cheerio.load(res.data);
- 
-    const seasonName = $(".as-season-name").text().trim();
-    const seasonPercent = $(".as-season-percentage").text().trim();
- 
+
     const items = [];
     $(".gacha-grid .gacha-card").each((i, el) => {
       const href = $(el).attr("href") || "";
-      const rarity = ($(el).attr("class") || "").match(/rarity-(\d+)/)?.[1] || null;
-      const isHot = $(el).find(".hot-tag").length > 0;
-      const title = $(el).find(".info-panel .title").text().trim();
-      const thumbnail = $(el).find(".image-area img").attr("src") || "";
-      const currentEp = $(el).find(".current-ep").text().trim();
-      const totalEp = $(el).find(".total-ep").text().trim();
- 
       items.push({
-        title,
-        thumbnail,
+        title: $(el).find(".info-panel .title").text().trim(),
+        thumbnail: $(el).find(".image-area img").attr("src") || "",
         slug: extractSlug(href),
-        rarity: rarity ? parseInt(rarity) : null,
-        isHot,
-        currentEpisode: currentEp ? parseInt(currentEp) : null,
-        totalEpisode: totalEp === "?" ? null : parseInt(totalEp),
+        rarity: ($(el).attr("class") || "").match(/rarity-(\d+)/)?.[1] || null,
+        isHot: $(el).find(".hot-tag").length > 0,
+        currentEpisode: parseInt($(el).find(".current-ep").text()) || null,
+        totalEpisode: $(el).find(".total-ep").text() === "?" ? null : parseInt($(el).find(".total-ep").text()) || null,
       });
     });
- 
+
     return {
       success: true,
       season: {
-        name: seasonName,
-        progress: seasonPercent,
+        name: $(".as-season-name").text().trim(),
+        progress: $(".as-season-percentage").text().trim(),
       },
       total: items.length,
       data: items,
     };
   } catch (err) {
-    console.error("❌ Error:", err.message);
-    return {
-      success: false,
-      message: "Gagal scrape: " + err.message,
-    };
+    return { success: false, message: "Gagal scrape: " + err.message };
   }
 }
 
-
+// ================= SCRAPER: DETAIL =================
 async function scrapeNontonAnimeDetail(url) {
   try {
-    const res = await fetchRetry(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-        Referer: BASE_URL + "/",
-      },
-    });
- 
+    const res = await fetchRetry(url);
     const $ = cheerio.load(res.data);
     const article = $("article");
- 
-    // ================= JUDUL =================
-    const title = article.find(".entry-title").text().trim();
- 
-    // ================= THUMBNAIL =================
-    const thumbnail = article.find(".anime-card__sidebar img").attr("src") || "";
- 
-    // ================= SCORE & TYPE =================
-    const score = article.find(".anime-card__score .value").text().trim();
-    const type = article.find(".anime-card__score .type").text().trim();
- 
-    // ================= TRAILER =================
-    const trailerUrl = article.find("a.trailerbutton").attr("href") || "";
- 
-    // ================= DETAILS =================
+
+    const genres = [];
+    article.find(".anime-card__genres .genre-tag").each((i, el) => {
+      genres.push({ name: $(el).text().trim(), slug: extractSlug($(el).attr("href")) });
+    });
+
     const details = {};
     article.find(".details-list li").each((i, el) => {
       const label = $(el).find(".detail-label").text().replace(":", "").trim();
@@ -192,44 +133,7 @@ async function scrapeNontonAnimeDetail(url) {
       const value = $(el).clone().children(".detail-label").remove().end().text().trim();
       if (label && value) details[label] = value;
     });
- 
-    // ================= GENRES =================
-    const genres = [];
-    article.find(".anime-card__genres .genre-tag").each((i, el) => {
-      genres.push({
-        name: $(el).text().trim(),
-        slug: extractSlug($(el).attr("href")),
-      });
-    });
- 
-    // ================= SYNOPSIS =================
-    const synopsis = article.find(".synopsis-prose").text().trim();
- 
-    // ================= QUICK INFO =================
-    const status = article.find(".anime-card__quick-info .info-item.status-airing, .anime-card__quick-info .info-item.status-finished")
-      .text().trim();
-    const episodes = article.find(".anime-card__quick-info .info-item").eq(1).text().trim();
-    const duration = article.find(".anime-card__quick-info .info-item").eq(2).text().trim();
-    const seasonText = article.find(".anime-card__quick-info .info-item.season a").text().trim();
-    const seasonSlug = extractSlug(article.find(".anime-card__quick-info .info-item.season a").attr("href") || "");
- 
-    // ================= FIRST & LAST EPISODE =================
-    const firstEpEl = article.find(".meta-episode-item.first a");
-    const lastEpEl = article.find(".meta-episode-item.last a");
- 
-    const firstEpisode = {
-      label: firstEpEl.find(".ep-label").text().trim(),
-      title: firstEpEl.clone().children(".ep-label, .watched-status").remove().end().text().trim(),
-      slug: extractSlug(firstEpEl.attr("href") || ""),
-    };
- 
-    const lastEpisode = {
-      label: lastEpEl.find(".ep-label").text().trim(),
-      title: lastEpEl.clone().children(".ep-label, .watched-status").remove().end().text().trim(),
-      slug: extractSlug(lastEpEl.attr("href") || ""),
-    };
- 
-    // ================= EPISODE LIST =================
+
     const episodeList = [];
     article.find(".episode-list-items .episode-item").each((i, el) => {
       episodeList.push({
@@ -238,85 +142,62 @@ async function scrapeNontonAnimeDetail(url) {
         slug: extractSlug($(el).attr("href") || ""),
       });
     });
- 
+
+    const firstEpEl = article.find(".meta-episode-item.first a");
+    const lastEpEl = article.find(".meta-episode-item.last a");
+
     return {
       success: true,
       data: {
-        title,
-        thumbnail,
-        score,
-        type,
-        trailerUrl,
+        title: article.find(".entry-title").text().trim(),
+        thumbnail: article.find(".anime-card__sidebar img").attr("src") || "",
+        score: article.find(".anime-card__score .value").text().trim(),
+        type: article.find(".anime-card__score .type").text().trim(),
+        trailerUrl: article.find("a.trailerbutton").attr("href") || "",
         details,
         genres,
-        synopsis,
-        status,
-        episodes,
-        duration,
+        synopsis: article.find(".synopsis-prose").text().trim(),
+        status: article.find(".info-item.status-airing, .info-item.status-finished").text().trim(),
+        episodes: article.find(".anime-card__quick-info .info-item").eq(1).text().trim(),
+        duration: article.find(".anime-card__quick-info .info-item").eq(2).text().trim(),
         season: {
-          name: seasonText,
-          slug: seasonSlug,
+          name: article.find(".info-item.season a").text().trim(),
+          slug: extractSlug(article.find(".info-item.season a").attr("href") || ""),
         },
-        firstEpisode,
-        lastEpisode,
+        firstEpisode: {
+          label: firstEpEl.find(".ep-label").text().trim(),
+          title: firstEpEl.clone().children(".ep-label, .watched-status").remove().end().text().trim(),
+          slug: extractSlug(firstEpEl.attr("href") || ""),
+        },
+        lastEpisode: {
+          label: lastEpEl.find(".ep-label").text().trim(),
+          title: lastEpEl.clone().children(".ep-label, .watched-status").remove().end().text().trim(),
+          slug: extractSlug(lastEpEl.attr("href") || ""),
+        },
         episodeList,
       },
     };
   } catch (err) {
-    console.error("❌ Error:", err.message);
-    return {
-      success: false,
-      message: "Gagal scrape: " + err.message,
-    };
+    return { success: false, message: "Gagal scrape: " + err.message };
   }
 }
 
-
- 
+// ================= SCRAPER: EPISODE =================
 async function scrapeNontonAnimeEpisode(url) {
   try {
-    const res = await fetchRetry(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-        Referer: BASE_URL + "/",
-      },
-    });
- 
-    const data = res.data;
- 
-    // 🔥 AMBIL COOKIE
-    const cookies =
-      res.headers["set-cookie"]?.map((c) => c.split(";")[0]).join("; ") || "";
- 
-    const $ = cheerio.load(data);
- 
-    // ================= HEADER INFO =================
-    const entryTitle = $(".entry-title").text().trim();
-    const author = $(".entry-author b").text().trim();
-    const dateRaw = $("time.updated").attr("datetime") || "";
-    const dateFormatted = $("time.updated").text().trim();
- 
-    // ================= BASIC =================
-    const title = $(".name").text().trim() || entryTitle;
-    const thumbnail = $(".featuredimgs img").attr("src") || "";
- 
-    // ================= DECODE SCRIPT =================
-    let nonce = "";
-    let ajaxUrl = "";
- 
+    const res = await fetchRetry(url);
+    const cookies = res.headers["set-cookie"]?.map(c => c.split(";")[0]).join("; ") || "";
+    const $ = cheerio.load(res.data);
+
+    let nonce = "", ajaxUrl = "";
     const scriptSrc = $("#ajax_video-js-extra").attr("src") || "";
- 
     if (scriptSrc.includes("base64,")) {
-      const base64 = scriptSrc.split("base64,")[1];
-      const decoded = Buffer.from(base64, "base64").toString("utf-8");
- 
+      const decoded = Buffer.from(scriptSrc.split("base64,")[1], "base64").toString("utf-8");
       nonce = decoded.match(/"nonce":"(.*?)"/)?.[1] || "";
       ajaxUrl = decoded.match(/"url":"(.*?)"/)?.[1] || "";
     }
- 
-    // ================= SERVERS =================
+
     const servers = [];
- 
     $(".serverplayer").each((i, el) => {
       servers.push({
         name: $(el).text().trim(),
@@ -325,12 +206,11 @@ async function scrapeNontonAnimeEpisode(url) {
         type: $(el).attr("data-type"),
       });
     });
- 
-    // ================= DEFAULT IFRAME =================
+
     const defaultIframe = $("#videoku iframe").attr("src") || "";
     const activeIndex = $(".serverplayer.current1").index();
- 
-    // ================= PLAYER AJAX =================
+
+    // ✅ FIX 4: Player fetch paralel dengan timeout lebih pendek
     async function getPlayer({ post, nume, type }) {
       try {
         const params = new URLSearchParams();
@@ -339,187 +219,111 @@ async function scrapeNontonAnimeEpisode(url) {
         params.append("serverName", type.toLowerCase());
         params.append("nume", nume);
         params.append("post", post);
- 
+
         const { data } = await axios.post(ajaxUrl, params, {
+          timeout: 6000, // ✅ timeout lebih pendek untuk player
           headers: {
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "User-Agent": "Mozilla/5.0",
+            "User-Agent": randomUA(),
             Origin: BASE_URL,
             Referer: url,
             "X-Requested-With": "XMLHttpRequest",
             Cookie: cookies,
-            Accept: "*/*",
-            "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
           },
         });
- 
-        const $$ = cheerio.load(data);
-        const iframe = $$("iframe").attr("src") || "";
- 
-        if (!iframe) {
-          console.log("❌ EMPTY:", type, nume);
-          console.log(data.slice(0, 200));
-        }
- 
-        return iframe;
+
+        return cheerio.load(data)("iframe").attr("src") || "";
       } catch (err) {
-        console.log("ERR:", err.message);
         return "";
       }
     }
- 
-    // ================= AMBIL SEMUA PLAYER =================
+
     const players = await Promise.all(
-  servers.map(async (srv, i) => {
-    let iframe = "";
+      servers.map(async (srv, i) => ({
+        name: srv.name,
+        iframe: i === activeIndex && defaultIframe ? defaultIframe : await getPlayer(srv),
+      }))
+    );
 
-    if (i === activeIndex && defaultIframe) {
-      iframe = defaultIframe;
-    } else {
-      iframe = await getPlayer(srv);
-    }
-
-    return {
-      name: srv.name,
-      iframe,
-    };
-  })
-);
- 
-    // ================= DOWNLOAD =================
     const downloads = [];
- 
     $("#download_area .listlink a").each((i, el) => {
-      downloads.push({
-        name: $(el).text().trim(),
-        url: $(el).attr("href"),
-      });
+      downloads.push({ name: $(el).text().trim(), url: $(el).attr("href") });
     });
- 
-    const extractSlug = (href) =>
-      href ? href.replace(BASE_URL, "").replace(/\//g, "") : "";
- 
-    // Prev: ada link-nya hanya kalau tidak ada .dashicons-dismiss di dalam .nvs pertama
+
+    const slugFromHref = (href) => href ? href.replace(BASE_URL, "").replace(/\//g, "") : "";
+
     const prevEl = $("#navigation-episode .nvs").eq(0);
-    const prevHref = prevEl.find(".dashicons-dismiss").length
-      ? ""
-      : prevEl.find("a").attr("href") || "";
-    const prev = extractSlug(prevHref);
- 
-   const allEpisodeHref = $("#navigation-episode .nvsc a").attr("href") || "";
-    const allEpisode = allEpisodeHref
-      ? allEpisodeHref.replace(/\/$/, "").split("/").filter(Boolean).pop()
-      : "";
- 
-    // Next: link di .nvs terakhir
     const nextEl = $("#navigation-episode .nvs").eq(2);
-    const nextHref = nextEl.find(".dashicons-dismiss").length
-      ? ""
-      : nextEl.find("a").attr("href") || "";
-    const next = extractSlug(nextHref);
- 
+    const allEpisodeHref = $("#navigation-episode .nvsc a").attr("href") || "";
+
     return {
       success: true,
       data: {
-        // Header info
-        entryTitle,
-        author,
-        date: {
-          raw: dateRaw,
-          formatted: dateFormatted,
-        },
- 
-        // Main content
-        title,
-        thumbnail,
+        entryTitle: $(".entry-title").text().trim(),
+        author: $(".entry-author b").text().trim(),
+        date: { raw: $("time.updated").attr("datetime") || "", formatted: $("time.updated").text().trim() },
+        title: $(".name").text().trim() || $(".entry-title").text().trim(),
+        thumbnail: $(".featuredimgs img").attr("src") || "",
         players,
         downloads,
- 
-        // Navigation
-        prev,
-        allEpisode,
-        next,
+        prev: slugFromHref(prevEl.find(".dashicons-dismiss").length ? "" : prevEl.find("a").attr("href") || ""),
+        allEpisode: allEpisodeHref ? allEpisodeHref.replace(/\/$/, "").split("/").filter(Boolean).pop() : "",
+        next: slugFromHref(nextEl.find(".dashicons-dismiss").length ? "" : nextEl.find("a").attr("href") || ""),
       },
     };
   } catch (err) {
-    console.error("❌ Error:", err.message);
- 
-    return {
-      success: false,
-      message: "Gagal scrape: " + err.message,
-    };
+    return { success: false, message: "Gagal scrape: " + err.message };
   }
 }
 
+// ================= ROUTES =================
+
+// ✅ FIX 5: Cache per slug yang benar
 app.get("/animeid/detail/:slug", async (req, res) => {
-  try {
-    const { slug } = req.params;
- 
-    if (!slug) {
-      return res.status(400).json({
-        success: false,
-        message: "Slug diperlukan",
-      });
-    }
- 
-    const url = buildAnimeUrl(slug);
-    console.log(`🔍 Scraping detail: ${url}`);
- 
-    const result = await scrapeNontonAnimeDetail(url);
-    setCache("ongoing", result, 300);
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({
-      success: false,
-      message: err.message,
-    });
+  const { slug } = req.params;
+  if (!slug) return res.status(400).json({ success: false, message: "Slug diperlukan" });
+
+  const cacheKey = `detail_${slug}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`✅ Cache hit: ${cacheKey}`);
+    return res.json(cached);
   }
+
+  console.log(`🔍 Scraping detail: ${slug}`);
+  const result = await scrapeNontonAnimeDetail(buildAnimeUrl(slug));
+  if (result.success) setCache(cacheKey, result, 600); // cache 10 menit
+  res.json(result);
 });
- 
-// ================= ROUTE: /episode/:slug =================
+
 app.get("/animeid/episode/:slug", async (req, res) => {
-  try {
-    const { slug } = req.params;
- 
-    if (!slug) {
-      return res.status(400).json({
-        success: false,
-        message: "Slug diperlukan",
-      });
-    }
- 
-    const url = buildUrl(slug);
-    console.log(`🔍 Scraping: ${url}`);
- 
-    const result = await scrapeNontonAnimeEpisode(url);
-    setCache("ongoing", result, 300);
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({
-      success: false,
-      message: err.message,
-    });
+  const { slug } = req.params;
+  if (!slug) return res.status(400).json({ success: false, message: "Slug diperlukan" });
+
+  const cacheKey = `episode_${slug}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`✅ Cache hit: ${cacheKey}`);
+    return res.json(cached);
   }
+
+  console.log(`🔍 Scraping episode: ${slug}`);
+  const result = await scrapeNontonAnimeEpisode(buildUrl(slug));
+  if (result.success) setCache(cacheKey, result, 600);
+  res.json(result);
 });
 
-// ================= ROUTE: /animeid/ongoing =================
 app.get("/animeid/ongoing", async (req, res) => {
-  try {
-    console.log("🔍 Scraping ongoing list...");
-    const result = await scrapeNontonAnimeOngoing();
-    setCache("ongoing", result, 300);
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({
-      success: false,
-      message: err.message,
-    });
+  const cached = getCache("ongoing_list");
+  if (cached) {
+    console.log("✅ Cache hit: ongoing");
+    return res.json(cached);
   }
+
+  console.log("🔍 Scraping ongoing...");
+  const result = await scrapeNontonAnimeOngoing();
+  if (result.success) setCache("ongoing_list", result, 300); // cache 5 menit
+  res.json(result);
 });
 
- 
-
-
-app.listen(PORT, () =>
-  console.log(`🚀 Server jalan di http://localhost:${PORT}`),
-);
+app.listen(PORT, () => console.log(`🚀 Server jalan di http://localhost:${PORT}`));
