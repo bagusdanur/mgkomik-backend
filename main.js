@@ -433,6 +433,7 @@ app.get("/animeid/detail/:slug", async (req, res) => {
     console.log(`🔍 Scraping detail: ${url}`);
  
     const result = await scrapeNontonAnimeDetail(url);
+    setCache("ongoing", result, 300);
     res.json(result);
   } catch (err) {
     res.status(500).json({
@@ -458,7 +459,7 @@ app.get("/animeid/episode/:slug", async (req, res) => {
     console.log(`🔍 Scraping: ${url}`);
  
     const result = await scrapeNontonAnimeEpisode(url);
- 
+    setCache("ongoing", result, 300);
     res.json(result);
   } catch (err) {
     res.status(500).json({
