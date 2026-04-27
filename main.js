@@ -3,7 +3,9 @@ const cheerio = require("cheerio");
 const express = require("express");
 const app = express();
 const PORT = process.env.PORT || 3012;
-
+app.use(cors({
+  origin: "*", // atau "http://localhost:3000"
+}));
 const BASE_URL = "https://s13.nontonanimeid.boats";
 
 // Helper: build full URL from slug
