@@ -5,10 +5,55 @@ const app = express();
 const cors = require("cors");
 const PORT = process.env.PORT || 3012;
 app.use(cors({
-  origin: "*", // atau "http://localhost:3000"
+  origin: "*",
 }));
 const BASE_URL = "https://s13.nontonanimeid.boats";
 
+
+const axiosInstance = axios.create({
+  timeout: 15000,
+  headers: {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+    "Accept":
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
+    "Connection": "keep-alive",
+    "Referer": BASE_URL + "/",
+  },
+});
+
+async function fetchRetry(url, options = {}, retries = 3) {
+  try {
+    return await axiosInstance.get(url, options);
+  } catch (err) {
+    if (retries > 0) {
+      console.log("🔁 Retry:", url);
+      await new Promise(r => setTimeout(r, 1000));
+      return fetchRetry(url, options, retries - 1);
+    }
+    throw err;
+  }
+}
+
+const cache = new Map();
+
+function setCache(key, data, ttl = 60) {
+  cache.set(key, {
+    data,
+    expire: Date.now() + ttl * 1000,
+  });
+}
+
+function getCache(key) {
+  const item = cache.get(key);
+  if (!item) return null;
+  if (Date.now() > item.expire) {
+    cache.delete(key);
+    return null;
+  }
+  return item.data;
+}
 // Helper: build full URL from slug
 // Helper: build full URL from slug
 function buildUrl(slug) {
@@ -29,7 +74,7 @@ function buildAnimeUrl(slug) {
 async function scrapeNontonAnimeOngoing() {
   try {
     const url = `${BASE_URL}/ongoing-list/`;
-    const res = await axios.get(url, {
+    const res = await fetchRetry(url, {
       headers: {
         "User-Agent": "Mozilla/5.0",
         Referer: BASE_URL + "/",
@@ -83,7 +128,7 @@ async function scrapeNontonAnimeOngoing() {
 
 async function scrapeNontonAnimeDetail(url) {
   try {
-    const res = await axios.get(url, {
+    const res = await fetchRetry(url, {
       headers: {
         "User-Agent": "Mozilla/5.0",
         Referer: BASE_URL + "/",
@@ -197,7 +242,7 @@ async function scrapeNontonAnimeDetail(url) {
  
 async function scrapeNontonAnimeEpisode(url) {
   try {
-    const res = await axios.get(url, {
+    const res = await fetchRetry(url, {
       headers: {
         "User-Agent": "Mozilla/5.0",
         Referer: BASE_URL + "/",
@@ -291,22 +336,22 @@ async function scrapeNontonAnimeEpisode(url) {
     }
  
     // ================= AMBIL SEMUA PLAYER =================
-    const players = [];
- 
-    for (let i = 0; i < servers.length; i++) {
-      let iframe = "";
- 
-      if (i === activeIndex && defaultIframe) {
-        iframe = defaultIframe;
-      } else {
-        iframe = await getPlayer(servers[i]);
-      }
- 
-      players.push({
-        name: servers[i].name,
-        iframe,
-      });
+    const players = await Promise.all(
+  servers.map(async (srv, i) => {
+    let iframe = "";
+
+    if (i === activeIndex && defaultIframe) {
+      iframe = defaultIframe;
+    } else {
+      iframe = await getPlayer(srv);
     }
+
+    return {
+      name: srv.name,
+      iframe,
+    };
+  })
+);
  
     // ================= DOWNLOAD =================
     const downloads = [];
@@ -428,6 +473,7 @@ app.get("/animeid/ongoing", async (req, res) => {
   try {
     console.log("🔍 Scraping ongoing list...");
     const result = await scrapeNontonAnimeOngoing();
+    setCache("ongoing", result, 300);
     res.json(result);
   } catch (err) {
     res.status(500).json({
