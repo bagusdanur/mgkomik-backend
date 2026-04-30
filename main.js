@@ -221,7 +221,7 @@ for (let i = 1; i <= totalEpisodes; i++) {
   if (!episodeList[i - 1]) {
     const targetSlug = `${slugPattern}-episode-${i}`;
     episodeList[i - 1] = {
-      title: `Episode ${i.toString().padStart(2, '0')}`,
+      title: `Episode ${i}`,
       date: "",
       slug: targetSlug,
       isGuessed: true,
