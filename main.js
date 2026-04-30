@@ -114,7 +114,6 @@ async function scrapeNontonAnimeOngoing() {
   }
 }
 
-// ================= SCRAPER: DETAIL =================
 async function scrapeNontonAnimeDetail(url) {
   try {
     const res = await fetchRetry(url);
@@ -134,17 +133,108 @@ async function scrapeNontonAnimeDetail(url) {
       if (label && value) details[label] = value;
     });
 
+    // ================= HARDCODE 1-28 + REAL DATA =================
+    const baseSlug = extractSlug(url); // "digimon-beatbreak"
     const episodeList = [];
+
+    // 1. Real episodes dari HTML (dengan date)
     article.find(".episode-list-items .episode-item").each((i, el) => {
-      episodeList.push({
+      const slug = extractSlug($(el).attr("href") || "");
+      const epNum = parseInt(slug.match(/episode-(\d+)$/)?.[1] || 0);
+      
+      episodeList[epNum - 1] = {  // index 0 = ep1
         title: $(el).find(".ep-title").text().trim(),
         date: $(el).find(".ep-date").text().trim(),
-        slug: extractSlug($(el).attr("href") || ""),
-      });
+        slug,
+        source: "html"
+      };
     });
 
-    const firstEpEl = article.find(".meta-episode-item.first a");
-    const lastEpEl = article.find(".meta-episode-item.last a");
+    // ================= DYNAMIC TOTAL & SLUG PATTERN =================
+
+// ================= DYNAMIC TOTAL & SLUG PATTERN =================
+
+// 1. Extract pattern dari first/last episode
+const firstEpEl = article.find(".meta-episode-item.first a");
+const lastEpEl = article.find(".meta-episode-item.last a");
+
+let slugPattern = extractSlug(url); // fallback: "shingeki-no-kyojin"
+let totalEpisodes = 28; // default
+
+if (lastEpEl.length) {
+  const lastSlug = extractSlug(lastEpEl.attr("href") || "");
+  // Extract pattern: shingeki-no-kyojin-s1
+  const match = lastSlug.match(/(.+?)(?:-s\d+-|-episode-|ep-)(\d+)$/);
+  if (match) {
+    slugPattern = match[1]; // shingeki-no-kyojin-s1
+    totalEpisodes = parseInt(match[2]); // 25
+  }
+}
+
+console.log(`📊 Pattern: "${slugPattern}", Total: ${totalEpisodes}`);
+
+
+
+// 2. Real episodes dari HTML
+article.find(".episode-list-items .episode-item").each((i, el) => {
+  const slug = extractSlug($(el).attr("href") || "");
+  const epNum = parseInt(slug.match(/(\d+)$/)?.[1] || 0);
+  if (epNum > 0 && epNum <= totalEpisodes) {
+    episodeList[epNum - 1] = {
+      title: $(el).find(".ep-title").text().trim(),
+      date: $(el).find(".ep-date").text().trim(),
+      slug,
+      source: "html"
+    };
+  }
+});
+
+// 3. First & Last
+if (firstEpEl.length) {
+  const slug = extractSlug(firstEpEl.attr("href") || "");
+  const epNum = parseInt(slug.match(/(\d+)$/)?.[1] || 1);
+  if (epNum > 0 && epNum <= totalEpisodes) {
+    episodeList[epNum - 1] = {
+      title: firstEpEl.clone().children(".ep-label, .watched-status").remove().end().text().trim(),
+      date: "",
+      slug,
+      source: "meta"
+    };
+  }
+}
+
+if (lastEpEl.length) {
+  const slug = extractSlug(lastEpEl.attr("href") || "");
+  const epNum = parseInt(slug.match(/(\d+)$/)?.[1] || totalEpisodes);
+  if (epNum > 0 && epNum <= totalEpisodes) {
+    episodeList[epNum - 1] = {
+      title: lastEpEl.clone().children(".ep-label, .watched-status").remove().end().text().trim(),
+      date: "",
+      slug,
+      source: "meta"
+    };
+  }
+}
+
+// 4. HARDCODE dengan CORRECT pattern
+for (let i = 1; i <= totalEpisodes; i++) {
+  if (!episodeList[i - 1]) {
+    const targetSlug = `${slugPattern}-episode-${i}`;
+    episodeList[i - 1] = {
+      title: `Episode ${i.toString().padStart(2, '0')}`,
+      date: "",
+      slug: targetSlug,
+      isGuessed: true,
+      source: "hardcode"
+    };
+  }
+}
+
+// 5. Clean & return
+const cleanEpisodeList = episodeList.slice(0, totalEpisodes).filter(Boolean);
+
+console.log(`🎉 ${cleanEpisodeList.length}/${totalEpisodes} episodes`);
+
 
     return {
       success: true,
@@ -174,7 +264,7 @@ async function scrapeNontonAnimeDetail(url) {
           title: lastEpEl.clone().children(".ep-label, .watched-status").remove().end().text().trim(),
           slug: extractSlug(lastEpEl.attr("href") || ""),
         },
-        episodeList,
+        episodeList: cleanEpisodeList.reverse(), // ✅ EXACTLY 28 episodes, index 0=ep1, index 27=ep28
       },
     };
   } catch (err) {

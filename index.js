@@ -11,6 +11,7 @@ app.use(
   }),
 );
 
+
 function convertTimeToID(text) {
   return text
     .replace(/seconds? ago/i, "detik lalu")
