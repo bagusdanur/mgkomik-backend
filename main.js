@@ -159,7 +159,7 @@ const firstEpEl = article.find(".meta-episode-item.first a");
 const lastEpEl = article.find(".meta-episode-item.last a");
 
 let slugPattern = extractSlug(url); // fallback: "shingeki-no-kyojin"
-let totalEpisodes = 28; // default
+let totalEpisodes = 1; // default
 
 if (lastEpEl.length) {
   const lastSlug = extractSlug(lastEpEl.attr("href") || "");
