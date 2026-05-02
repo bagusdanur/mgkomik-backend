@@ -424,11 +424,10 @@ async function scrapeNontonAnimeJadwal() {
           ? $(el).find(".as-delay-details").text().replace("Info:", "").trim()
           : $(el).find(".as-release-time").text().replace("🕒", "").trim();
  
-        // rating, type, episodes
-        const spans = $(el).find(".as-quick-info span");
-        const rating = spans.eq(0).clone().children(".icon").remove().end().text().trim();
-        const type   = spans.eq(1).clone().children(".icon").remove().end().text().trim();
-        const episodes = spans.eq(2).clone().children(".icon").remove().end().text().trim();
+        // rating, type, episodes — pakai class spesifik, strip icon emoji
+        const rating   = $(el).find(".as-rating").clone().children(".icon").remove().end().text().trim();
+        const type     = $(el).find(".as-type").clone().children(".icon").remove().end().text().trim();
+        const episodes = $(el).find(".as-episodes").clone().children(".icon").remove().end().text().trim();
  
         items.push({
           title: $(el).find(".as-anime-title").text().trim(),
