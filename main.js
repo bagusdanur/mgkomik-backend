@@ -499,7 +499,7 @@ app.get("/animeid/jadwal/:hari", async (req, res) => {
   const full = await scrapeNontonAnimeJadwal();
   if (!full.success) return res.json(full);
  
-  setCache("jadwal", full, 3600);
+  setCache("jadwal", full, 86400);
   res.json({
     success: true,
     hari,
