@@ -397,6 +397,118 @@ async function scrapeNontonAnimeTerbaru() {
     return { success: false, message: "Gagal scrape terbaru: " + err.message };
   }
 }
+
+// ================= SCRAPER: JADWAL =================
+// Tambahkan fungsi ini ke server.js kamu (sebelum bagian ROUTES)
+ 
+async function scrapeNontonAnimeJadwal() {
+  try {
+    const res = await fetchRetry(`${BASE_URL}/jadwal-rilis/`);
+    const $ = cheerio.load(res.data);
+ 
+    const HARI = ["senin", "selasa", "rabu", "kamis", "jumat", "sabtu", "minggu"];
+    const jadwal = {};
+ 
+    HARI.forEach((hari) => {
+      const items = [];
+ 
+      $(`#${hari} .as-anime-card`).each((i, el) => {
+        const href = $(el).attr("href") || "";
+        const slug = href.replace(/\/$/, "").split("/").filter(Boolean).pop();
+        const status = $(el).attr("data-status") || "on-schedule"; // "on-schedule" | "delayed"
+ 
+        const isDelayed = status === "delayed";
+ 
+        // jam tayang atau info libur
+        const releaseTime = isDelayed
+          ? $(el).find(".as-delay-details").text().replace("Info:", "").trim()
+          : $(el).find(".as-release-time").text().replace("🕒", "").trim();
+ 
+        // rating, type, episodes
+        const spans = $(el).find(".as-quick-info span");
+        const rating = spans.eq(0).clone().children(".icon").remove().end().text().trim();
+        const type   = spans.eq(1).clone().children(".icon").remove().end().text().trim();
+        const episodes = spans.eq(2).clone().children(".icon").remove().end().text().trim();
+ 
+        items.push({
+          title: $(el).find(".as-anime-title").text().trim(),
+          thumbnail: $(el).find("img").attr("src") || "",
+          slug,
+          status,       // "on-schedule" | "delayed"
+          rating,       // "8.91"
+          type,         // "TV" | "ONA"
+          episodes,     // "4 / 19"
+          releaseTime,  // "21:10 WIB" atau "Rilis Kembali 8 Mei"
+        });
+      });
+ 
+      jadwal[hari] = items;
+    });
+ 
+    // hari aktif dari tab HTML (biasanya hari ini)
+    const activeDay = $(".as-tab-link.active").attr("data-tab") || "senin";
+ 
+    return {
+      success: true,
+      activeDay,
+      data: jadwal,
+    };
+  } catch (err) {
+    return { success: false, message: "Gagal scrape jadwal: " + err.message };
+  }
+}
+ 
+// ================= ROUTES: JADWAL =================
+// Tambahkan kedua route ini ke server.js kamu (di bagian ROUTES)
+ 
+// GET /animeid/jadwal → semua hari sekaligus
+app.get("/animeid/jadwal", async (req, res) => {
+  const cached = getCache("jadwal");
+  if (cached) {
+    console.log("✅ Cache hit: jadwal");
+    return res.json(cached);
+  }
+ 
+  console.log("🔍 Scraping jadwal...");
+  const result = await scrapeNontonAnimeJadwal();
+  if (result.success) setCache("jadwal", result, 86400); // cache 1 jam
+  res.json(result);
+});
+ 
+// GET /animeid/jadwal/:hari → filter per hari, contoh: /animeid/jadwal/sabtu
+app.get("/animeid/jadwal/:hari", async (req, res) => {
+  const { hari } = req.params;
+  const VALID = ["senin", "selasa", "rabu", "kamis", "jumat", "sabtu", "minggu"];
+ 
+  if (!VALID.includes(hari)) {
+    return res.status(400).json({ success: false, message: `Hari tidak valid. Pilih: ${VALID.join(", ")}` });
+  }
+ 
+  // coba ambil dari cache full dulu
+  const fullCached = getCache("jadwal");
+  if (fullCached) {
+    return res.json({
+      success: true,
+      hari,
+      total: fullCached.data[hari]?.length || 0,
+      data: fullCached.data[hari] || [],
+    });
+  }
+ 
+  // kalau belum ada, scrape lalu cache full
+  console.log(`🔍 Scraping jadwal untuk: ${hari}`);
+  const full = await scrapeNontonAnimeJadwal();
+  if (!full.success) return res.json(full);
+ 
+  setCache("jadwal", full, 3600);
+  res.json({
+    success: true,
+    hari,
+    total: full.data[hari]?.length || 0,
+    data: full.data[hari] || [],
+  });
+});
+
 // ================= ROUTES =================
 
 app.get("/animeid/terbaru", async (req, res) => {
@@ -411,21 +523,6 @@ app.get("/animeid/terbaru", async (req, res) => {
   if (result.success) setCache("terbaru", result, 120); // cache 2 menit
   res.json(result);
 
-});app.get("/animeid/terbaru", async (req, res) => {
-  const page = parseInt(req.query.page) || 1;
-  if (page < 1) return res.status(400).json({ success: false, message: "Page minimal 1" });
-
-  const cacheKey = `terbaru_page_${page}`;
-  const cached = getCache(cacheKey);
-  if (cached) {
-    console.log(`✅ Cache hit: ${cacheKey}`);
-    return res.json(cached);
-  }
-
-  console.log(`🔍 Scraping terbaru page ${page}...`);
-  const result = await scrapeNontonAnimeTerbaru(page);
-  if (result.success) setCache(cacheKey, result, 120); // cache 2 menit (konten cepat berubah)
-  res.json(result);
 });
 
 // ✅ FIX 5: Cache per slug yang benar
