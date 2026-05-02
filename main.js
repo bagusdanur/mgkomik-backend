@@ -366,7 +366,67 @@ async function scrapeNontonAnimeEpisode(url) {
   }
 }
 
+// ================= SCRAPER: TERBARU =================
+async function scrapeNontonAnimeTerbaru() {
+  try {
+    const res = await fetchRetry(`${BASE_URL}/`);
+    const $ = cheerio.load(res.data);
+
+    const items = [];
+    $("#postbaru .misha_posts_wrap article.animeseries").each((i, el) => {
+      const anchor = $(el).find("a").first();
+      const href = anchor.attr("href") || "";
+      const slug = href.replace(/\/$/, "").split("/").filter(Boolean).pop();
+      const epText = $(el).find("span.types.episodes").text().trim();
+
+      items.push({
+        title: $(el).find("h3.entry-title span").text().trim(),
+        thumbnail: $(el).find("img").attr("src") || "",
+        slug,
+        latestEpisode: parseInt(epText.replace(/\D/g, "")) || null,
+        url: href,
+      });
+    });
+
+    return {
+      success: true,
+      total: items.length,
+      data: items,
+    };
+  } catch (err) {
+    return { success: false, message: "Gagal scrape terbaru: " + err.message };
+  }
+}
 // ================= ROUTES =================
+
+app.get("/animeid/terbaru", async (req, res) => {
+  const cached = getCache("terbaru");
+  if (cached) {
+    console.log("✅ Cache hit: terbaru");
+    return res.json(cached);
+  }
+
+  console.log("🔍 Scraping terbaru...");
+  const result = await scrapeNontonAnimeTerbaru();
+  if (result.success) setCache("terbaru", result, 120); // cache 2 menit
+  res.json(result);
+
+});app.get("/animeid/terbaru", async (req, res) => {
+  const page = parseInt(req.query.page) || 1;
+  if (page < 1) return res.status(400).json({ success: false, message: "Page minimal 1" });
+
+  const cacheKey = `terbaru_page_${page}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`✅ Cache hit: ${cacheKey}`);
+    return res.json(cached);
+  }
+
+  console.log(`🔍 Scraping terbaru page ${page}...`);
+  const result = await scrapeNontonAnimeTerbaru(page);
+  if (result.success) setCache(cacheKey, result, 120); // cache 2 menit (konten cepat berubah)
+  res.json(result);
+});
 
 // ✅ FIX 5: Cache per slug yang benar
 app.get("/animeid/detail/:slug", async (req, res) => {
