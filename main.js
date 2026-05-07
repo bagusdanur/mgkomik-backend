@@ -456,6 +456,108 @@ async function scrapeNontonAnimeJadwal() {
     return { success: false, message: "Gagal scrape jadwal: " + err.message };
   }
 }
+
+// ================= SCRAPER: SEARCH WITH PAGE =================
+async function scrapeNontonAnimeSearchPaged(query, page = 1) {
+  try {
+    const encodedQuery = encodeURIComponent(query);
+    // Format URL pagination: /page/2/?s=classroom
+    const pagePath = page > 1 ? `/page/${page}` : "";
+    const url = `${BASE_URL}${pagePath}/?s=${encodedQuery}`;
+    
+    const res = await fetchRetry(url);
+    const $ = cheerio.load(res.data);
+
+    const items = [];
+    
+    $(".as-anime-grid .as-anime-card").each((i, el) => {
+      const href = $(el).attr("href") || "";
+      const slug = href.replace(/\/$/, "").split("/").filter(Boolean).pop();
+      
+      let thumbnail = $(el).find("img").attr("src") || "";
+      if (!thumbnail) {
+        const style = $(el).attr("style") || "";
+        const match = style.match(/url\(['"]?(.*?)['"]?\)/);
+        thumbnail = match ? match[1] : "";
+      }
+      
+      const rating = $(el).find(".as-rating").clone().children(".icon").remove().end().text().trim();
+      const type = $(el).find(".as-type").clone().children(".icon").remove().end().text().trim();
+      const season = $(el).find(".as-season").clone().children(".icon").remove().end().text().trim();
+      
+      const genres = [];
+      $(el).find(".as-genres .as-genre-tag").each((j, genreEl) => {
+        genres.push($(genreEl).text().trim());
+      });
+
+      items.push({
+        title: $(el).find(".as-anime-title").text().trim(),
+        thumbnail,
+        slug,
+        url: href,
+        rating: rating || null,
+        type: type || null,
+        season: season || null,
+        synopsis: $(el).find(".as-synopsis").text().trim(),
+        genres,
+      });
+    });
+
+    // Pagination parsing
+    const currentPage = $(".wp-pagenavi .current").text().trim();
+    const hasNext = $(".wp-pagenavi .nextpostslink").length > 0;
+    const hasPrev = $(".wp-pagenavi .prevpostslink").length > 0;
+    const totalPagesText = $(".wp-pagenavi .pages").text().trim();
+    
+    // Extract total pages dari text "Halaman 1 dari 3"
+    const totalMatch = totalPagesText.match(/dari\s+(\d+)/);
+    const totalPages = totalMatch ? parseInt(totalMatch[1]) : 1;
+
+    return {
+      success: true,
+      query,
+      page: parseInt(currentPage) || page,
+      totalPages,
+      totalResults: items.length,
+      hasNext,
+      hasPrev,
+      data: items,
+    };
+  } catch (err) {
+    return { success: false, message: "Gagal scrape search: " + err.message };
+  }
+}
+
+
+// ================= ROUTE: SEARCH WITH PAGE =================
+app.get("/animeid/search", async (req, res) => {
+  const { q, page } = req.query;
+  
+  if (!q || q.trim().length < 2) {
+    return res.status(400).json({ 
+      success: false, 
+      message: "Parameter 'q' minimal 2 karakter" 
+    });
+  }
+
+  const pageNum = parseInt(page) || 1;
+  const cacheKey = `search_${q.toLowerCase().replace(/\s+/g, "_")}_p${pageNum}`;
+  const cached = getCache(cacheKey);
+  
+  if (cached) {
+    console.log(`✅ Cache hit: ${cacheKey}`);
+    return res.json(cached);
+  }
+
+  console.log(`🔍 Scraping search: "${q}" page ${pageNum}`);
+  const result = await scrapeNontonAnimeSearchPaged(q, pageNum);
+  
+  if (result.success) {
+    setCache(cacheKey, result, 300); // cache 5 menit
+  }
+  
+  res.json(result);
+});
  
 // ================= ROUTES: JADWAL =================
 // Tambahkan kedua route ini ke server.js kamu (di bagian ROUTES)

@@ -386,55 +386,62 @@ async function scrapeKomikuTerbaru() {
     const $ = cheerio.load(data);
     const results = [];
 
-    $("#Terbaru .ls4w article.ls4").each((_, el) => {
+    $("#Terbaru .ls2-wrap article.ls2").each((_, el) => {
       const element = $(el);
-      const link = element.find(".ls4v a").attr("href");
-      const imgEl = element.find(".ls4v img");
 
-      // 🔧 Ambil atribut gambar asli (lazy load fix)
+      // Link & image
+      const link = element.find(".ls2v a").attr("href") || "";
+      const imgEl = element.find(".ls2v img");
       const image =
         imgEl.attr("data-src") ||
         imgEl.attr("data-lazy-src") ||
         imgEl.attr("src") ||
         "";
 
-      const title = element.find(".ls4j h3 a").text().trim();
-      const typeGenreTime = element.find(".ls4s").text().trim(); // contoh: "Manhwa Fantasi 4 menit lalu"
-      const chapterTitle = element.find(".ls24").text().trim();
-      const chapterLink = element.find(".ls24").attr("href");
-      const up = element.find(".ls4v .up").text().trim() || "";
+      // Title
+      const title = element.find(".ls2j h3 a").text().trim();
 
-      // 🧠 Pisahkan type, genre, dan waktu
-      const parts = typeGenreTime.split(" ");
-      const type = parts.shift() || "";
-      let waktu = "";
-      let genre = "";
+      // Genre & waktu — dari .ls2t, contoh: "Romantis · 49 detik lalu"
+      const ls2tRaw = element.find(".ls2t").text().trim();
+      const ls2tParts = ls2tRaw.split("·").map((s) => s.trim());
+      const genre = ls2tParts[0] || "";
+      const waktu = ls2tParts[1] || "";
 
-      // cari pola waktu (misal: "4 menit lalu", "2 jam lalu")
-      const matchWaktu = typeGenreTime.match(/(\d+ [a-zA-Z]+ lalu)/);
-      if (matchWaktu) {
-        waktu = matchWaktu[1];
-        genre = typeGenreTime.replace(type, "").replace(waktu, "").trim();
-      } else {
-        genre = typeGenreTime.replace(type, "").trim();
-      }
+      // Chapter
+      const chapterEl = element.find(".ls2j a.ls2l");
+      const chapterTitle = chapterEl.text().trim();
+      const chapterLink = chapterEl.attr("href") || "";
 
-      const fullLink = link ? `https://komiku.org${link}` : "";
+      // Up badge
+      const up = element.find(".ls2v .up").text().trim() || "";
+
+      // Flag / origin (jp, kr, cn)
+      const flagSrc = element.find(".ls2v img.flag").attr("src") || "";
+      const flagMatch = flagSrc.match(/\/([a-z]{2})\.png$/);
+      const origin = flagMatch ? flagMatch[1].toUpperCase() : "";
+
+      const fullLink = link.startsWith("http")
+        ? link
+        : `https://komiku.org${link}`;
 
       const slug = fullLink
-        ? fullLink.replace("https://komiku.org/manga/", "").replace(/\//g, "")
-        : "";
+        .replace("https://komiku.org/manga/", "")
+        .replace(/\//g, "");
+
+      const fullChapterLink = chapterLink.startsWith("http")
+        ? chapterLink
+        : `https://komiku.org${chapterLink}`;
 
       results.push({
         title,
         slug,
         link: fullLink,
         image: image.startsWith("http") ? image : `https://komiku.org${image}`,
-        type,
         genre,
         waktu,
+        origin,
         chapter_terbaru: chapterTitle,
-        chapter_link: chapterLink ? `https://komiku.org${chapterLink}` : "",
+        chapter_link: fullChapterLink,
         up,
       });
     });
@@ -447,8 +454,7 @@ async function scrapeKomikuTerbaru() {
   }
 }
 
-// === Scraper: Komik Populer (Manga/Manhwa/Manhua) ===
-async function scrapeKomikuPopuler(selectorId) {
+async function scrapeKomikuPopuler(tipe = "semua") {
   try {
     const url = "https://komiku.org/";
     const { data } = await axios.get(url, {
@@ -457,28 +463,56 @@ async function scrapeKomikuPopuler(selectorId) {
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
       },
     });
+
     const $ = cheerio.load(data);
     const results = [];
 
-    $(`${selectorId} article.ls2`).each((_, el) => {
-      const link = $(el).find(".ls2v a").attr("href");
-      const imgEl = $(el).find(".ls2v img");
-      const image = imgEl.attr("data-src") || imgEl.attr("src") || "";
-      const title = $(el).find(".ls2j h3 a").text().trim();
-      const genreViews = $(el).find(".ls2t").text().trim(); // contoh: "Fantasi 1.1jtx"
-      const chapterTitle = $(el).find(".ls2l").text().trim();
-      const chapterLink = $(el).find(".ls2l").attr("href");
+    // Semua artikel ada di satu container, difilter lewat data-tipe
+    const selector =
+      tipe === "semua"
+        ? "#Komik_Populer article.ls2"
+        : `#Komik_Populer article.ls2[data-tipe="${tipe}"]`;
 
-      const [genre, views] = genreViews.split(" ");
+    $(selector).each((_, el) => {
+      const element = $(el);
+      const link = element.find(".ls2v a").attr("href") || "";
+      const imgEl = element.find(".ls2v img");
+      const image =
+        imgEl.attr("data-src") ||
+        imgEl.attr("data-lazy-src") ||
+        imgEl.attr("src") ||
+        "";
+
+      const title = element.find(".ls2j h3 a").text().trim();
+
+      // Format: "Fantasi · 1.3jt views"
+      const ls2tRaw = element.find(".ls2t").text().trim();
+      const ls2tParts = ls2tRaw.split("·").map((s) => s.trim());
+      const genre = ls2tParts[0] || "";
+      const views = ls2tParts[1] || "";
+
+      const chapterEl = element.find(".ls2j a.ls2l");
+      const chapterTitle = chapterEl.text().trim();
+      const chapterLink = chapterEl.attr("href") || "";
+
+      const dataTipe = element.attr("data-tipe") || "";
+
+      const flagSrc = element.find(".ls2v img.flag").attr("src") || "";
+      const flagMatch = flagSrc.match(/\/([a-z]{2})\.png$/);
+      const origin = flagMatch ? flagMatch[1].toUpperCase() : "";
 
       results.push({
         title,
-        link: `https://komiku.org${link}`,
+        link: link.startsWith("http") ? link : `https://komiku.org${link}`,
         image: image.startsWith("http") ? image : `https://komiku.org${image}`,
         genre,
         views,
+        tipe: dataTipe,
+        origin,
         chapter_terbaru: chapterTitle,
-        chapter_link: chapterLink ? `https://komiku.org${chapterLink}` : "",
+        chapter_link: chapterLink.startsWith("http")
+          ? chapterLink
+          : `https://komiku.org${chapterLink}`,
       });
     });
 
@@ -1574,9 +1608,9 @@ app.get("/komiku/home", async (_, res) => {
     const [terbaru, populerManga, populerManhwa, populerManhua] =
       await Promise.all([
         scrapeKomikuTerbaru(),
-        scrapeKomikuPopuler("#Komik_Hot_Manga"),
-        scrapeKomikuPopuler("#Komik_Hot_Manhwa"),
-        scrapeKomikuPopuler("#Komik_Hot_Manhua"),
+        scrapeKomikuPopuler("Manga"),
+        scrapeKomikuPopuler("Manhwa"),
+        scrapeKomikuPopuler("Manhua"),
       ]);
 
     res.json({
