@@ -5,6 +5,7 @@ const app = express();
 const PORT = process.env.PORT || 3012;
 const cors = require("cors");
 
+
 app.use(
   cors({
     origin: "*",
@@ -2059,6 +2060,21 @@ app.get("/kiryuu/search", async (req, res) => {
     });
   }
 });
+
+
+async function mgkomikFetch(url) {
+  return await cloudscraper.get(url, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
+      "Referer": "https://web.mgkomik.cc/",
+    },
+    timeout: 20000,
+  });
+}
+
 
 // ================= ROUTE =================
 app.get(/^\/mangaku\/chapter\/(.+)/, async (req, res) => {
