@@ -4,6 +4,7 @@ const express = require("express");
 const app = express();
 const cors = require("cors");
 const PORT = process.env.PORT || 3012;
+const cloudscraper = require("cloudscraper");
 
 app.use(cors({ origin: "*" }));
 
@@ -660,28 +661,29 @@ async function scrapeNontonAnimeSearchPaged(query, page = 1) {
   }
 }
 
+async function mgkomikFetch(url) {
+  return await cloudscraper.get(url, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
+      "Referer": "https://web.mgkomik.cc/",
+    },
+    timeout: 20000,
+  });
+}
+
 async function scrapeMgkomikPustaka({ page = 1 } = {}) {
   try {
-    const url = `https://web.mgkomik.cc/?page=${page}`;
+    const url =
+      page === 1
+        ? "https://web.mgkomik.cc/?page=1"
+        : `https://web.mgkomik.cc/?page=${page}`;
 
     console.log("🔥 Mgkomik URL:", url);
 
-    const { data } = await axios.get(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Accept-Encoding": "gzip, deflate, br",
-        Connection: "keep-alive",
-        Referer: "https://web.mgkomik.cc/",
-        "Upgrade-Insecure-Requests": "1",
-      },
-      timeout: 20000,
-      decompress: true,
-    });
-
+    const data = await mgkomikFetch(url); // ← ganti dari axios
     const $ = cheerio.load(data);
     const results = [];
 
