@@ -21,17 +21,17 @@ function randomUA() {
 }
 
 function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 // ✅ FIX 1: Timeout lebih pendek (8 detik)
 const axiosInstance = axios.create({
   timeout: 8000,
   headers: {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
     "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
+    Connection: "keep-alive",
     "Upgrade-Insecure-Requests": "1",
   },
 });
@@ -44,14 +44,16 @@ async function fetchRetry(url, options = {}, retries = 2) {
       headers: {
         ...options.headers,
         "User-Agent": randomUA(),
-        "Referer": BASE_URL + "/",
+        Referer: BASE_URL + "/",
       },
     });
   } catch (err) {
     if (retries <= 0) throw err;
 
     const delay = err.response?.status === 403 ? 1500 : 500;
-    console.log(`🔁 Retry (${retries} left) [${err.response?.status || err.code}]: ${url}`);
+    console.log(
+      `🔁 Retry (${retries} left) [${err.response?.status || err.code}]: ${url}`,
+    );
     await sleep(delay);
     return fetchRetry(url, options, retries - 1);
   }
@@ -67,7 +69,10 @@ function setCache(key, data, ttl = 300) {
 function getCache(key) {
   const item = cache.get(key);
   if (!item) return null;
-  if (Date.now() > item.expire) { cache.delete(key); return null; }
+  if (Date.now() > item.expire) {
+    cache.delete(key);
+    return null;
+  }
   return item.data;
 }
 
@@ -77,8 +82,12 @@ const extractSlug = (href) => {
   return href.replace(/\/$/, "").split("/").pop();
 };
 
-function buildUrl(slug) { return `${BASE_URL}/${slug}/`; }
-function buildAnimeUrl(slug) { return `${BASE_URL}/anime/${slug}/`; }
+function buildUrl(slug) {
+  return `${BASE_URL}/${slug}/`;
+}
+function buildAnimeUrl(slug) {
+  return `${BASE_URL}/anime/${slug}/`;
+}
 
 // ================= SCRAPER: ONGOING =================
 async function scrapeNontonAnimeOngoing() {
@@ -96,7 +105,10 @@ async function scrapeNontonAnimeOngoing() {
         rarity: ($(el).attr("class") || "").match(/rarity-(\d+)/)?.[1] || null,
         isHot: $(el).find(".hot-tag").length > 0,
         currentEpisode: parseInt($(el).find(".current-ep").text()) || null,
-        totalEpisode: $(el).find(".total-ep").text() === "?" ? null : parseInt($(el).find(".total-ep").text()) || null,
+        totalEpisode:
+          $(el).find(".total-ep").text() === "?"
+            ? null
+            : parseInt($(el).find(".total-ep").text()) || null,
       });
     });
 
@@ -122,14 +134,23 @@ async function scrapeNontonAnimeDetail(url) {
 
     const genres = [];
     article.find(".anime-card__genres .genre-tag").each((i, el) => {
-      genres.push({ name: $(el).text().trim(), slug: extractSlug($(el).attr("href")) });
+      genres.push({
+        name: $(el).text().trim(),
+        slug: extractSlug($(el).attr("href")),
+      });
     });
 
     const details = {};
     article.find(".details-list li").each((i, el) => {
       const label = $(el).find(".detail-label").text().replace(":", "").trim();
       if (!label || $(el).hasClass("detail-separator")) return;
-      const value = $(el).clone().children(".detail-label").remove().end().text().trim();
+      const value = $(el)
+        .clone()
+        .children(".detail-label")
+        .remove()
+        .end()
+        .text()
+        .trim();
       if (label && value) details[label] = value;
     });
 
@@ -141,100 +162,112 @@ async function scrapeNontonAnimeDetail(url) {
     article.find(".episode-list-items .episode-item").each((i, el) => {
       const slug = extractSlug($(el).attr("href") || "");
       const epNum = parseInt(slug.match(/episode-(\d+)$/)?.[1] || 0);
-      
-      episodeList[epNum - 1] = {  // index 0 = ep1
+
+      episodeList[epNum - 1] = {
+        // index 0 = ep1
         title: $(el).find(".ep-title").text().trim(),
         date: $(el).find(".ep-date").text().trim(),
         slug,
-        source: "html"
+        source: "html",
       };
     });
 
     // ================= DYNAMIC TOTAL & SLUG PATTERN =================
 
-// ================= DYNAMIC TOTAL & SLUG PATTERN =================
+    // ================= DYNAMIC TOTAL & SLUG PATTERN =================
 
-// 1. Extract pattern dari first/last episode
-const firstEpEl = article.find(".meta-episode-item.first a");
-const lastEpEl = article.find(".meta-episode-item.last a");
+    // 1. Extract pattern dari first/last episode
+    const firstEpEl = article.find(".meta-episode-item.first a");
+    const lastEpEl = article.find(".meta-episode-item.last a");
 
-let slugPattern = extractSlug(url); // fallback: "shingeki-no-kyojin"
-let totalEpisodes = 1; // default
+    let slugPattern = extractSlug(url); // fallback: "shingeki-no-kyojin"
+    let totalEpisodes = 1; // default
 
-if (lastEpEl.length) {
-  const lastSlug = extractSlug(lastEpEl.attr("href") || "");
-  // Extract pattern: shingeki-no-kyojin-s1
-  const match = lastSlug.match(/(.+?)(?:-s\d+-|-episode-|ep-)(\d+)$/);
-  if (match) {
-    slugPattern = match[1]; // shingeki-no-kyojin-s1
-    totalEpisodes = parseInt(match[2]); // 25
-  }
-}
+    if (lastEpEl.length) {
+      const lastSlug = extractSlug(lastEpEl.attr("href") || "");
+      // Extract pattern: shingeki-no-kyojin-s1
+      const match = lastSlug.match(/(.+?)(?:-s\d+-|-episode-|ep-)(\d+)$/);
+      if (match) {
+        slugPattern = match[1]; // shingeki-no-kyojin-s1
+        totalEpisodes = parseInt(match[2]); // 25
+      }
+    }
 
-console.log(`📊 Pattern: "${slugPattern}", Total: ${totalEpisodes}`);
+    console.log(`📊 Pattern: "${slugPattern}", Total: ${totalEpisodes}`);
 
+    // 2. Real episodes dari HTML
+    article.find(".episode-list-items .episode-item").each((i, el) => {
+      const slug = extractSlug($(el).attr("href") || "");
+      const epNum = parseInt(slug.match(/(\d+)$/)?.[1] || 0);
+      if (epNum > 0 && epNum <= totalEpisodes) {
+        episodeList[epNum - 1] = {
+          title: $(el).find(".ep-title").text().trim(),
+          date: $(el).find(".ep-date").text().trim(),
+          slug,
+          source: "html",
+        };
+      }
+    });
 
+    // 3. First & Last
+    if (firstEpEl.length) {
+      const slug = extractSlug(firstEpEl.attr("href") || "");
+      const epNum = parseInt(slug.match(/(\d+)$/)?.[1] || 1);
+      if (epNum > 0 && epNum <= totalEpisodes) {
+        episodeList[epNum - 1] = {
+          title: firstEpEl
+            .clone()
+            .children(".ep-label, .watched-status")
+            .remove()
+            .end()
+            .text()
+            .trim(),
+          date: "",
+          slug,
+          source: "meta",
+        };
+      }
+    }
 
-// 2. Real episodes dari HTML
-article.find(".episode-list-items .episode-item").each((i, el) => {
-  const slug = extractSlug($(el).attr("href") || "");
-  const epNum = parseInt(slug.match(/(\d+)$/)?.[1] || 0);
-  if (epNum > 0 && epNum <= totalEpisodes) {
-    episodeList[epNum - 1] = {
-      title: $(el).find(".ep-title").text().trim(),
-      date: $(el).find(".ep-date").text().trim(),
-      slug,
-      source: "html"
-    };
-  }
-});
+    if (lastEpEl.length) {
+      const slug = extractSlug(lastEpEl.attr("href") || "");
+      const epNum = parseInt(slug.match(/(\d+)$/)?.[1] || totalEpisodes);
+      if (epNum > 0 && epNum <= totalEpisodes) {
+        episodeList[epNum - 1] = {
+          title: lastEpEl
+            .clone()
+            .children(".ep-label, .watched-status")
+            .remove()
+            .end()
+            .text()
+            .trim(),
+          date: "",
+          slug,
+          source: "meta",
+        };
+      }
+    }
 
-// 3. First & Last
-if (firstEpEl.length) {
-  const slug = extractSlug(firstEpEl.attr("href") || "");
-  const epNum = parseInt(slug.match(/(\d+)$/)?.[1] || 1);
-  if (epNum > 0 && epNum <= totalEpisodes) {
-    episodeList[epNum - 1] = {
-      title: firstEpEl.clone().children(".ep-label, .watched-status").remove().end().text().trim(),
-      date: "",
-      slug,
-      source: "meta"
-    };
-  }
-}
+    // 4. HARDCODE dengan CORRECT pattern
+    for (let i = 1; i <= totalEpisodes; i++) {
+      if (!episodeList[i - 1]) {
+        const targetSlug = `${slugPattern}-episode-${i}`;
+        episodeList[i - 1] = {
+          title: `Episode ${i}`,
+          date: "",
+          slug: targetSlug,
+          isGuessed: true,
+          source: "hardcode",
+        };
+      }
+    }
 
-if (lastEpEl.length) {
-  const slug = extractSlug(lastEpEl.attr("href") || "");
-  const epNum = parseInt(slug.match(/(\d+)$/)?.[1] || totalEpisodes);
-  if (epNum > 0 && epNum <= totalEpisodes) {
-    episodeList[epNum - 1] = {
-      title: lastEpEl.clone().children(".ep-label, .watched-status").remove().end().text().trim(),
-      date: "",
-      slug,
-      source: "meta"
-    };
-  }
-}
+    // 5. Clean & return
+    const cleanEpisodeList = episodeList
+      .slice(0, totalEpisodes)
+      .filter(Boolean);
 
-// 4. HARDCODE dengan CORRECT pattern
-for (let i = 1; i <= totalEpisodes; i++) {
-  if (!episodeList[i - 1]) {
-    const targetSlug = `${slugPattern}-episode-${i}`;
-    episodeList[i - 1] = {
-      title: `Episode ${i}`,
-      date: "",
-      slug: targetSlug,
-      isGuessed: true,
-      source: "hardcode"
-    };
-  }
-}
-
-// 5. Clean & return
-const cleanEpisodeList = episodeList.slice(0, totalEpisodes).filter(Boolean);
-
-console.log(`🎉 ${cleanEpisodeList.length}/${totalEpisodes} episodes`);
-
+    console.log(`🎉 ${cleanEpisodeList.length}/${totalEpisodes} episodes`);
 
     return {
       success: true,
@@ -247,21 +280,46 @@ console.log(`🎉 ${cleanEpisodeList.length}/${totalEpisodes} episodes`);
         details,
         genres,
         synopsis: article.find(".synopsis-prose").text().trim(),
-        status: article.find(".info-item.status-airing, .info-item.status-finished").text().trim(),
-        episodes: article.find(".anime-card__quick-info .info-item").eq(1).text().trim(),
-        duration: article.find(".anime-card__quick-info .info-item").eq(2).text().trim(),
+        status: article
+          .find(".info-item.status-airing, .info-item.status-finished")
+          .text()
+          .trim(),
+        episodes: article
+          .find(".anime-card__quick-info .info-item")
+          .eq(1)
+          .text()
+          .trim(),
+        duration: article
+          .find(".anime-card__quick-info .info-item")
+          .eq(2)
+          .text()
+          .trim(),
         season: {
           name: article.find(".info-item.season a").text().trim(),
-          slug: extractSlug(article.find(".info-item.season a").attr("href") || ""),
+          slug: extractSlug(
+            article.find(".info-item.season a").attr("href") || "",
+          ),
         },
         firstEpisode: {
           label: firstEpEl.find(".ep-label").text().trim(),
-          title: firstEpEl.clone().children(".ep-label, .watched-status").remove().end().text().trim(),
+          title: firstEpEl
+            .clone()
+            .children(".ep-label, .watched-status")
+            .remove()
+            .end()
+            .text()
+            .trim(),
           slug: extractSlug(firstEpEl.attr("href") || ""),
         },
         lastEpisode: {
           label: lastEpEl.find(".ep-label").text().trim(),
-          title: lastEpEl.clone().children(".ep-label, .watched-status").remove().end().text().trim(),
+          title: lastEpEl
+            .clone()
+            .children(".ep-label, .watched-status")
+            .remove()
+            .end()
+            .text()
+            .trim(),
           slug: extractSlug(lastEpEl.attr("href") || ""),
         },
         episodeList: cleanEpisodeList.reverse(), // ✅ EXACTLY 28 episodes, index 0=ep1, index 27=ep28
@@ -276,13 +334,18 @@ console.log(`🎉 ${cleanEpisodeList.length}/${totalEpisodes} episodes`);
 async function scrapeNontonAnimeEpisode(url) {
   try {
     const res = await fetchRetry(url);
-    const cookies = res.headers["set-cookie"]?.map(c => c.split(";")[0]).join("; ") || "";
+    const cookies =
+      res.headers["set-cookie"]?.map((c) => c.split(";")[0]).join("; ") || "";
     const $ = cheerio.load(res.data);
 
-    let nonce = "", ajaxUrl = "";
+    let nonce = "",
+      ajaxUrl = "";
     const scriptSrc = $("#ajax_video-js-extra").attr("src") || "";
     if (scriptSrc.includes("base64,")) {
-      const decoded = Buffer.from(scriptSrc.split("base64,")[1], "base64").toString("utf-8");
+      const decoded = Buffer.from(
+        scriptSrc.split("base64,")[1],
+        "base64",
+      ).toString("utf-8");
       nonce = decoded.match(/"nonce":"(.*?)"/)?.[1] || "";
       ajaxUrl = decoded.match(/"url":"(.*?)"/)?.[1] || "";
     }
@@ -331,8 +394,11 @@ async function scrapeNontonAnimeEpisode(url) {
     const players = await Promise.all(
       servers.map(async (srv, i) => ({
         name: srv.name,
-        iframe: i === activeIndex && defaultIframe ? defaultIframe : await getPlayer(srv),
-      }))
+        iframe:
+          i === activeIndex && defaultIframe
+            ? defaultIframe
+            : await getPlayer(srv),
+      })),
     );
 
     const downloads = [];
@@ -340,7 +406,8 @@ async function scrapeNontonAnimeEpisode(url) {
       downloads.push({ name: $(el).text().trim(), url: $(el).attr("href") });
     });
 
-    const slugFromHref = (href) => href ? href.replace(BASE_URL, "").replace(/\//g, "") : "";
+    const slugFromHref = (href) =>
+      href ? href.replace(BASE_URL, "").replace(/\//g, "") : "";
 
     const prevEl = $("#navigation-episode .nvs").eq(0);
     const nextEl = $("#navigation-episode .nvs").eq(2);
@@ -351,14 +418,27 @@ async function scrapeNontonAnimeEpisode(url) {
       data: {
         entryTitle: $(".entry-title").text().trim(),
         author: $(".entry-author b").text().trim(),
-        date: { raw: $("time.updated").attr("datetime") || "", formatted: $("time.updated").text().trim() },
+        date: {
+          raw: $("time.updated").attr("datetime") || "",
+          formatted: $("time.updated").text().trim(),
+        },
         title: $(".name").text().trim() || $(".entry-title").text().trim(),
         thumbnail: $(".featuredimgs img").attr("src") || "",
         players,
         downloads,
-        prev: slugFromHref(prevEl.find(".dashicons-dismiss").length ? "" : prevEl.find("a").attr("href") || ""),
-        allEpisode: allEpisodeHref ? allEpisodeHref.replace(/\/$/, "").split("/").filter(Boolean).pop() : "",
-        next: slugFromHref(nextEl.find(".dashicons-dismiss").length ? "" : nextEl.find("a").attr("href") || ""),
+        prev: slugFromHref(
+          prevEl.find(".dashicons-dismiss").length
+            ? ""
+            : prevEl.find("a").attr("href") || "",
+        ),
+        allEpisode: allEpisodeHref
+          ? allEpisodeHref.replace(/\/$/, "").split("/").filter(Boolean).pop()
+          : "",
+        next: slugFromHref(
+          nextEl.find(".dashicons-dismiss").length
+            ? ""
+            : nextEl.find("a").attr("href") || "",
+        ),
       },
     };
   } catch (err) {
@@ -400,53 +480,82 @@ async function scrapeNontonAnimeTerbaru() {
 
 // ================= SCRAPER: JADWAL =================
 // Tambahkan fungsi ini ke server.js kamu (sebelum bagian ROUTES)
- 
+
 async function scrapeNontonAnimeJadwal() {
   try {
     const res = await fetchRetry(`${BASE_URL}/jadwal-rilis/`);
     const $ = cheerio.load(res.data);
- 
-    const HARI = ["senin", "selasa", "rabu", "kamis", "jumat", "sabtu", "minggu"];
+
+    const HARI = [
+      "senin",
+      "selasa",
+      "rabu",
+      "kamis",
+      "jumat",
+      "sabtu",
+      "minggu",
+    ];
     const jadwal = {};
- 
+
     HARI.forEach((hari) => {
       const items = [];
- 
+
       $(`#${hari} .as-anime-card`).each((i, el) => {
         const href = $(el).attr("href") || "";
         const slug = href.replace(/\/$/, "").split("/").filter(Boolean).pop();
         const status = $(el).attr("data-status") || "on-schedule"; // "on-schedule" | "delayed"
- 
+
         const isDelayed = status === "delayed";
- 
+
         // jam tayang atau info libur
         const releaseTime = isDelayed
           ? $(el).find(".as-delay-details").text().replace("Info:", "").trim()
           : $(el).find(".as-release-time").text().replace("🕒", "").trim();
- 
+
         // rating, type, episodes — pakai class spesifik, strip icon emoji
-        const rating   = $(el).find(".as-rating").clone().children(".icon").remove().end().text().trim();
-        const type     = $(el).find(".as-type").clone().children(".icon").remove().end().text().trim();
-        const episodes = $(el).find(".as-episodes").clone().children(".icon").remove().end().text().trim();
- 
+        const rating = $(el)
+          .find(".as-rating")
+          .clone()
+          .children(".icon")
+          .remove()
+          .end()
+          .text()
+          .trim();
+        const type = $(el)
+          .find(".as-type")
+          .clone()
+          .children(".icon")
+          .remove()
+          .end()
+          .text()
+          .trim();
+        const episodes = $(el)
+          .find(".as-episodes")
+          .clone()
+          .children(".icon")
+          .remove()
+          .end()
+          .text()
+          .trim();
+
         items.push({
           title: $(el).find(".as-anime-title").text().trim(),
           thumbnail: $(el).find("img").attr("src") || "",
           slug,
-          status,       // "on-schedule" | "delayed"
-          rating,       // "8.91"
-          type,         // "TV" | "ONA"
-          episodes,     // "4 / 19"
-          releaseTime,  // "21:10 WIB" atau "Rilis Kembali 8 Mei"
+          status, // "on-schedule" | "delayed"
+          rating, // "8.91"
+          type, // "TV" | "ONA"
+          episodes, // "4 / 19"
+          releaseTime, // "21:10 WIB" atau "Rilis Kembali 8 Mei"
         });
       });
- 
+
       jadwal[hari] = items;
     });
- 
+
     // hari aktif dari tab HTML (biasanya hari ini)
     const activeDay = $(".as-tab-link.active").attr("data-tab") || "senin";
- 
+
     return {
       success: true,
       activeDay,
@@ -464,31 +573,54 @@ async function scrapeNontonAnimeSearchPaged(query, page = 1) {
     // Format URL pagination: /page/2/?s=classroom
     const pagePath = page > 1 ? `/page/${page}` : "";
     const url = `${BASE_URL}${pagePath}/?s=${encodedQuery}`;
-    
+
     const res = await fetchRetry(url);
     const $ = cheerio.load(res.data);
 
     const items = [];
-    
+
     $(".as-anime-grid .as-anime-card").each((i, el) => {
       const href = $(el).attr("href") || "";
       const slug = href.replace(/\/$/, "").split("/").filter(Boolean).pop();
-      
+
       let thumbnail = $(el).find("img").attr("src") || "";
       if (!thumbnail) {
         const style = $(el).attr("style") || "";
         const match = style.match(/url\(['"]?(.*?)['"]?\)/);
         thumbnail = match ? match[1] : "";
       }
-      
-      const rating = $(el).find(".as-rating").clone().children(".icon").remove().end().text().trim();
-      const type = $(el).find(".as-type").clone().children(".icon").remove().end().text().trim();
-      const season = $(el).find(".as-season").clone().children(".icon").remove().end().text().trim();
-      
+
+      const rating = $(el)
+        .find(".as-rating")
+        .clone()
+        .children(".icon")
+        .remove()
+        .end()
+        .text()
+        .trim();
+      const type = $(el)
+        .find(".as-type")
+        .clone()
+        .children(".icon")
+        .remove()
+        .end()
+        .text()
+        .trim();
+      const season = $(el)
+        .find(".as-season")
+        .clone()
+        .children(".icon")
+        .remove()
+        .end()
+        .text()
+        .trim();
+
       const genres = [];
-      $(el).find(".as-genres .as-genre-tag").each((j, genreEl) => {
-        genres.push($(genreEl).text().trim());
-      });
+      $(el)
+        .find(".as-genres .as-genre-tag")
+        .each((j, genreEl) => {
+          genres.push($(genreEl).text().trim());
+        });
 
       items.push({
         title: $(el).find(".as-anime-title").text().trim(),
@@ -508,7 +640,7 @@ async function scrapeNontonAnimeSearchPaged(query, page = 1) {
     const hasNext = $(".wp-pagenavi .nextpostslink").length > 0;
     const hasPrev = $(".wp-pagenavi .prevpostslink").length > 0;
     const totalPagesText = $(".wp-pagenavi .pages").text().trim();
-    
+
     // Extract total pages dari text "Halaman 1 dari 3"
     const totalMatch = totalPagesText.match(/dari\s+(\d+)/);
     const totalPages = totalMatch ? parseInt(totalMatch[1]) : 1;
@@ -528,22 +660,362 @@ async function scrapeNontonAnimeSearchPaged(query, page = 1) {
   }
 }
 
+async function scrapeMgkomikPustaka({ page = 1 } = {}) {
+  try {
+    const url = `https://web.mgkomik.cc/?page=${page}`;
+
+    console.log("🔥 Mgkomik URL:", url);
+
+    const { data } = await axios.get(url, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        Connection: "keep-alive",
+        Referer: "https://web.mgkomik.cc/",
+        "Upgrade-Insecure-Requests": "1",
+      },
+      timeout: 20000,
+      decompress: true,
+    });
+
+    const $ = cheerio.load(data);
+    const results = [];
+
+    $(".manga-grid .manga-card").each((_, el) => {
+      // slug dari data-slug attribute
+      const slug = $(el).attr("data-slug") || "";
+
+      const link = $(el).find(".card-cover a").first().attr("href") || "";
+      const fullLink = link.startsWith("http")
+        ? link
+        : `https://web.mgkomik.cc${link}`;
+
+      const title = $(el).find(".manga-title").text().trim();
+
+      const image = $(el).find(".manga-cover").attr("src") || "";
+
+      // Chapter terbaru = .chapter-row pertam
+
+      // FIX:
+      const chapterTerbaru = $(el)
+        .find(".chapter-row")
+        .first()
+        .find(".chapter-capsule")
+        .text()
+        .trim();
+
+      // Type dari flag-badge title: "Manhwa (Korea)", "Manhua (China)", "Manga (Jepang)"
+      const flagTitle = $(el).find(".flag-badge").attr("title") || "";
+      const typeMatch = flagTitle.match(/^(\w+)/);
+      const typeGenre = typeMatch ? typeMatch[1] : "";
+
+      // Status: ongoing / completed
+      const status = $(el).find(".manga-status-badge").text().trim();
+
+      if (!title || !slug) return;
+
+      results.push({
+        source: "mgkomik",
+        title,
+        slug,
+        image,
+        detail_link: fullLink,
+        description: "",
+        type_genre: typeGenre, // "Manga" | "Manhwa" | "Manhua"
+        info: status, // "Ongoing" | "Completed"
+        chapter_awal: "",
+        chapter_terbaru: chapterTerbaru,
+      });
+    });
+
+    // ================= PAGINATION =================
+    // web.mgkomik.cc pakai ?page=N, cari total dari elemen pagination
+    let totalPages = page;
+
+    const lastPageHref =
+      $(".wp-pagenavi a.last, .pagination a.last, a[aria-label='Last Page']")
+        .last()
+        .attr("href") || "";
+
+    const lastPageMatch =
+      lastPageHref.match(/[?&]page=(\d+)/) ||
+      lastPageHref.match(/\/page\/(\d+)/);
+
+    if (lastPageMatch) {
+      totalPages = parseInt(lastPageMatch[1]);
+    } else {
+      // Fallback: ambil angka terbesar dari semua link pagination
+      const pageNums = $("a[href*='page=']")
+        .map((_, el) => {
+          const href = $(el).attr("href") || "";
+          const m = href.match(/[?&]page=(\d+)/);
+          return m ? parseInt(m[1]) : 0;
+        })
+        .get()
+        .filter((n) => n > 0);
+
+      if (pageNums.length) totalPages = Math.max(...pageNums);
+    }
+
+    return {
+      success: true,
+      meta: {
+        currentPage: page,
+        totalPages,
+        totalItems: results.length,
+      },
+      data: results,
+    };
+  } catch (err) {
+    console.error("❌ Mgkomik error:", err.message);
+    console.error("❌ Status:", err.response?.status);
+    return {
+      success: false,
+      meta: {
+        currentPage: page,
+        totalPages: 1,
+        totalItems: 0,
+      },
+      data: [],
+    };
+  }
+}
+
+async function scrapeMgkomikChapter(fullUrl) {
+  try {
+    const { data } = await axios.get(fullUrl, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        Referer: "https://web.mgkomik.cc/",
+      },
+      timeout: 15000,
+    });
+
+    const $ = cheerio.load(data);
+
+    // ================= MANGA INFO =================
+    // dari: <a href="/komik/the-profound-mirror-immortal-clan/">The Profound Mirror Immortal Clan</a>
+    const mangaLink = $(".manga-name a").attr("href") || "";
+    const mangaSlug =
+      mangaLink.split("/komik/").pop()?.replace(/\/$/, "") || "";
+
+    // dari: <h1 id="chapterTitleClick">Chapter 00</h1>
+    const currentChapter = $("#chapterTitleClick")
+      .clone()
+      .children()
+      .remove()
+      .end()
+      .text()
+      .trim();
+
+    // ================= CHAPTER LIST dari DROPDOWN =================
+    // dari: .chapter-dropdown-item[data-chapter="17"]
+    const chapterList = [];
+
+    $(".chapter-dropdown-list .chapter-dropdown-item").each((_, el) => {
+      const link = $(el).attr("href") || "";
+      const chapterNum = $(el).attr("data-chapter") || "";
+      const fullLink = link.startsWith("http")
+        ? link
+        : `https://web.mgkomik.cc${link}`;
+
+      const chapterSlug = link.split("/").filter(Boolean).pop();
+
+      if (!link) return;
+
+      chapterList.push({
+        slug: chapterSlug,
+        chapter: chapterNum,
+        link: fullLink,
+      });
+    });
+
+    // dropdown urutan: terbaru → lama, reverse biar lama → terbaru
+    const reversed = [...chapterList].reverse();
+
+    // ================= CURRENT SLUG =================
+    const currentSlug = new URL(fullUrl).pathname
+      .split("/")
+      .filter(Boolean)
+      .pop();
+
+    // ================= PREV & NEXT =================
+    const index = reversed.findIndex((c) => c.slug === currentSlug);
+
+    let prev = null;
+    let next = null;
+
+    if (index !== -1) {
+      prev = reversed[index - 1]?.slug || null;
+      next = reversed[index + 1]?.slug || null;
+    }
+
+    // ================= IMAGES =================
+    // dari: .reading-content img[data-page]
+    const images = [];
+
+    $(".reading-content img").each((_, el) => {
+      const src = $(el).attr("src") || $(el).attr("data-src") || "";
+
+      if (src && !src.startsWith("data:")) {
+        images.push(src.trim());
+      }
+    });
+
+    return {
+      success: true,
+      source: "mgkomik",
+
+      // sama seperti kiryuu: mangaId
+      mangaId: mangaSlug,
+
+      // chapterSlug = mangaSlug/chapter-slug
+      chapterSlug: `${mangaSlug}/${currentSlug}`,
+
+      // judul chapter
+      currentChapter: currentChapter,
+
+      // prev/next dalam format mangaSlug/chapter-slug (bukan slug doang)
+      prev: prev ? `${mangaSlug}/${prev}` : null,
+      next: next ? `${mangaSlug}/${next}` : null,
+
+      back_to_detail: `https://web.mgkomik.cc/komik/${mangaSlug}/`,
+      images,
+      totalImages: images.length,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      message: err.message,
+    };
+  }
+}
+
+async function scrapeMgkomikDetail(slug) {
+  try {
+    const url = `https://web.mgkomik.cc/komik/${slug}/`;
+
+    const { data } = await axios.get(url, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
+        Referer: "https://web.mgkomik.cc/",
+        Connection: "keep-alive",
+      },
+      timeout: 15000,
+    });
+
+    const $ = cheerio.load(data);
+
+    // ================= TITLE =================
+    const title = $(".manga-title").first().text().trim();
+
+    // ================= THUMBNAIL =================
+    const thumbnail = $(".manga-cover-large").attr("src") || "";
+
+    // ================= META (type, status, release) =================
+    const metaItems = $(".manga-meta .meta-item")
+      .map((_, el) => $(el).text().trim())
+      .get();
+
+    // metaItems = ["Manhua", "OnGoing", "Release: 2025"]
+    const type = metaItems[0] || "";
+    const status = metaItems[1] || "";
+    const release = metaItems[2]?.replace("Release:", "").trim() || "";
+
+    // ================= GENRES =================
+    const genres = $(".genre-list .genre-tag")
+      .map((_, el) => $(el).text().trim())
+      .get();
+
+    // ================= SYNOPSIS =================
+    const synopsis = $(".manga-description p").text().trim() || "Tidak ada sinopsis.";
+
+    // ================= CHAPTER AWAL & TERBARU =================
+    const firstChapterHref = $(".read-btn").first().attr("href") || "";
+    const lastChapterHref = $(".read-btn").last().attr("href") || "";
+
+    const getChapterSlug = (href) =>
+      href.split("/komik/").pop()?.replace(/\/$/, "") || "";
+
+    const firstChapterSlug = getChapterSlug(firstChapterHref);
+    const lastChapterSlug = getChapterSlug(lastChapterHref);
+
+    // ================= CHAPTER LIST =================
+    const chapters = [];
+
+    $(".chapter-list .chapter-list-item").each((_, el) => {
+      const link = $(el).find(".chapter-link").attr("href") || "";
+      const chapterNum = $(el).find(".chapter-number").text().trim();
+      const date = $(el).find(".chapter-date").text().trim();
+      const chapterSlug = getChapterSlug(`/komik${link}`);
+
+      if (!link) return;
+
+      chapters.push({
+        title: chapterNum,
+        slug: `${slug}/${link.split("/komik/")[1]?.replace(/\/$/, "")}`,
+        link: `https://web.mgkomik.cc${link}`,
+        date,
+      });
+    });
+
+    // list dari HTML urutan terbaru → lama, reverse biar lama → terbaru
+    chapters.reverse();
+
+    return {
+      success: true,
+      data: {
+        title,
+        thumbnail,
+        type,
+        status,
+
+        Pengarang: "-",
+        Umur: "-",
+        Konsep: release,
+
+        genres,
+        synopsis,
+
+        info: lastChapterSlug, // chapter terbaru slug
+        chapter_awal: firstChapterSlug,
+
+        total_chapter: chapters.length,
+        chapters,
+      },
+    };
+  } catch (err) {
+    console.error("❌ Mgkomik detail error:", err.message);
+    return {
+      success: false,
+      message: "Gagal scrape detail.",
+    };
+  }
+}
 
 // ================= ROUTE: SEARCH WITH PAGE =================
 app.get("/animeid/search", async (req, res) => {
   const { q, page } = req.query;
-  
+
   if (!q || q.trim().length < 2) {
-    return res.status(400).json({ 
-      success: false, 
-      message: "Parameter 'q' minimal 2 karakter" 
+    return res.status(400).json({
+      success: false,
+      message: "Parameter 'q' minimal 2 karakter",
     });
   }
 
   const pageNum = parseInt(page) || 1;
   const cacheKey = `search_${q.toLowerCase().replace(/\s+/g, "_")}_p${pageNum}`;
   const cached = getCache(cacheKey);
-  
+
   if (cached) {
     console.log(`✅ Cache hit: ${cacheKey}`);
     return res.json(cached);
@@ -551,17 +1023,17 @@ app.get("/animeid/search", async (req, res) => {
 
   console.log(`🔍 Scraping search: "${q}" page ${pageNum}`);
   const result = await scrapeNontonAnimeSearchPaged(q, pageNum);
-  
+
   if (result.success) {
     setCache(cacheKey, result, 300); // cache 5 menit
   }
-  
+
   res.json(result);
 });
- 
+
 // ================= ROUTES: JADWAL =================
 // Tambahkan kedua route ini ke server.js kamu (di bagian ROUTES)
- 
+
 // GET /animeid/jadwal → semua hari sekaligus
 app.get("/animeid/jadwal", async (req, res) => {
   const cached = getCache("jadwal");
@@ -569,22 +1041,33 @@ app.get("/animeid/jadwal", async (req, res) => {
     console.log("✅ Cache hit: jadwal");
     return res.json(cached);
   }
- 
+
   console.log("🔍 Scraping jadwal...");
   const result = await scrapeNontonAnimeJadwal();
   if (result.success) setCache("jadwal", result, 86400); // cache 1 jam
   res.json(result);
 });
- 
+
 // GET /animeid/jadwal/:hari → filter per hari, contoh: /animeid/jadwal/sabtu
 app.get("/animeid/jadwal/:hari", async (req, res) => {
   const { hari } = req.params;
-  const VALID = ["senin", "selasa", "rabu", "kamis", "jumat", "sabtu", "minggu"];
- 
+  const VALID = [
+    "senin",
+    "selasa",
+    "rabu",
+    "kamis",
+    "jumat",
+    "sabtu",
+    "minggu",
+  ];
+
   if (!VALID.includes(hari)) {
-    return res.status(400).json({ success: false, message: `Hari tidak valid. Pilih: ${VALID.join(", ")}` });
+    return res.status(400).json({
+      success: false,
+      message: `Hari tidak valid. Pilih: ${VALID.join(", ")}`,
+    });
   }
- 
+
   // coba ambil dari cache full dulu
   const fullCached = getCache("jadwal");
   if (fullCached) {
@@ -595,12 +1078,12 @@ app.get("/animeid/jadwal/:hari", async (req, res) => {
       data: fullCached.data[hari] || [],
     });
   }
- 
+
   // kalau belum ada, scrape lalu cache full
   console.log(`🔍 Scraping jadwal untuk: ${hari}`);
   const full = await scrapeNontonAnimeJadwal();
   if (!full.success) return res.json(full);
- 
+
   setCache("jadwal", full, 86400);
   res.json({
     success: true,
@@ -623,13 +1106,13 @@ app.get("/animeid/terbaru", async (req, res) => {
   const result = await scrapeNontonAnimeTerbaru();
   if (result.success) setCache("terbaru", result, 120); // cache 2 menit
   res.json(result);
-
 });
 
 // ✅ FIX 5: Cache per slug yang benar
 app.get("/animeid/detail/:slug", async (req, res) => {
   const { slug } = req.params;
-  if (!slug) return res.status(400).json({ success: false, message: "Slug diperlukan" });
+  if (!slug)
+    return res.status(400).json({ success: false, message: "Slug diperlukan" });
 
   const cacheKey = `detail_${slug}`;
   const cached = getCache(cacheKey);
@@ -646,7 +1129,8 @@ app.get("/animeid/detail/:slug", async (req, res) => {
 
 app.get("/animeid/episode/:slug", async (req, res) => {
   const { slug } = req.params;
-  if (!slug) return res.status(400).json({ success: false, message: "Slug diperlukan" });
+  if (!slug)
+    return res.status(400).json({ success: false, message: "Slug diperlukan" });
 
   const cacheKey = `episode_${slug}`;
   const cached = getCache(cacheKey);
@@ -674,4 +1158,87 @@ app.get("/animeid/ongoing", async (req, res) => {
   res.json(result);
 });
 
-app.listen(PORT, () => console.log(`🚀 Server jalan di http://localhost:${PORT}`));
+app.get("/mgkomik/pustaka", async (req, res) => {
+  const page = parseInt(req.query.page) || 1;
+  const cacheKey = `mgkomik_pustaka_page_${page}`;
+
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`✅ Cache hit: mgkomik pustaka page ${page}`);
+    return res.json(cached);
+  }
+
+  console.log(`🔍 Scraping mgkomik pustaka page ${page}...`);
+  const result = await scrapeMgkomikPustaka({ page });
+
+  if (!result.data.length) {
+    return res.json({
+      success: true,
+      page,
+      total: 0,
+      data: [],
+      warning: "Data kosong / Site limit",
+    });
+  }
+
+  setCache(cacheKey, result, 300); // 5 menit
+  res.json(result);
+});
+
+app.get(/^\/mgkomik\/chapter\/(.+)/, async (req, res) => {
+  try {
+    const slug = req.params[0];
+    const cacheKey = `mgkomik_chapter_${slug}`;
+
+    const cached = getCache(cacheKey);
+    if (cached) {
+      console.log(`✅ Cache hit: mgkomik chapter ${slug}`);
+      return res.json(cached);
+    }
+
+    console.log(`🔍 Scraping mgkomik chapter ${slug}...`);
+    const fullUrl = `https://web.mgkomik.cc/komik/${slug}/`;
+    const result = await scrapeMgkomikChapter(fullUrl);
+
+    if (result.success) setCache(cacheKey, result, 86400); // 24 jam
+    res.json(result);
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+app.get("/mgkomik/detail/:slug", async (req, res) => {
+  try {
+    const { slug } = req.params;
+
+    if (!slug) {
+      return res.status(400).json({
+        success: false,
+        message: "Slug tidak diberikan!",
+      });
+    }
+
+    const cacheKey = `mgkomik_detail_${slug}`;
+
+    const cached = getCache(cacheKey);
+    if (cached) {
+      console.log(`✅ Cache hit: mgkomik detail ${slug}`);
+      return res.json(cached);
+    }
+
+    console.log(`🔍 Scraping mgkomik detail ${slug}...`);
+    const result = await scrapeMgkomikDetail(slug);
+
+    if (result.success) setCache(cacheKey, result, 3600); // 1 jam
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      message: "Terjadi kesalahan pada server",
+    });
+  }
+});
+
+app.listen(PORT, () =>
+  console.log(`🚀 Server jalan di http://localhost:${PORT}`),
+);
