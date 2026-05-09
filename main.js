@@ -664,7 +664,7 @@ async function scrapeNontonAnimeSearchPaged(query, page = 1) {
 const BASE_URLs = "https://nekopoi.care";
 const WORKER_URL = "https://sekte.ezcantik9.workers.dev";
 
-function buildUrl(slug) {
+function buildNekoUrl(slug) {               // ✅ was: buildUrl (konflik!)
   return `${BASE_URLs}/${slug}/`;
 }
 
@@ -1141,7 +1141,7 @@ app.get("/nekopoi/episode/:slug", async (req, res) => {
   }
 
   console.log(`🔍 Scraping episode: ${slug}`);
-  const result = await scrapeNekopoiEpisode(buildUrl(slug));
+  const result = await scrapeNekopoiEpisode(buildNekoUrl(slug));
 
   if (result.success) setCache(cacheKey, result, 60 * 60 * 24 * 7); // ✅ cache 7 hari (dalam detik)
 
