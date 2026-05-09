@@ -661,19 +661,519 @@ async function scrapeNontonAnimeSearchPaged(query, page = 1) {
   }
 }
 
-async function mgkomikFetch(url) {
-  return await cloudscraper.get(url, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
-      "Referer": "https://web.mgkomik.cc/",
-    },
-    timeout: 20000,
-  });
+const BASE_URLs = "https://nekopoi.care";
+const WORKER_URL = "https://sekte.ezcantik9.workers.dev";
+
+function buildUrl(slug) {
+  return `${BASE_URLs}/${slug}/`;
 }
 
+function slugFromHref(href = "") {
+  if (!href) return "";
+  return href.replace(/\/$/, "").split("/").filter(Boolean).pop() || "";
+}
+
+// ✅ Ubah ini — fetch lewat CF Worker
+async function fetchHtml(url) {
+  const { data } = await axios.get(`${WORKER_URL}?url=${encodeURIComponent(url)}`, {
+    timeout: 15000,
+  });
+  return data;
+}
+// ─── Scraper: Halaman Episode ─────────────────────────────────────────────────
+/**
+ * Scrape halaman episode nekopoi
+ * Contoh URL: https://nekopoi.care/chimimonryou-episode-1-subtitle-indonesia/
+ */
+// ─── Scraper: Episode ─────────────────────────────────────────────────────────
+async function scrapeNekopoiEpisode(url) {
+  try {
+    const html = await fetchHtml(url);
+    const $ = cheerio.load(html);
+ 
+    // ── Players ──────────────────────────────────────────────────────────────
+    // Struktur: #nk-stream-1, #nk-stream-2, #nk-stream-3
+    // Tab label: #nk-player-tabs a
+    const players = [];
+    $("#nk-player-tabs a").each((i, tabEl) => {
+      const tabId = $(tabEl).attr("href"); // contoh: "#nk-stream-1"
+      if (!tabId || tabId === "#") return;
+      const frameId = tabId.replace("#", ""); // "nk-stream-1"
+      const iframe = $(`#${frameId} iframe`);
+      const src = iframe.attr("src") || "";
+      if (src) {
+        players.push({
+          label: $(tabEl).text().trim(), // "Server 1"
+          src,
+        });
+      }
+    });
+ 
+    // ── Downloads ─────────────────────────────────────────────────────────────
+    // Struktur: .nk-download-box > .nk-download-row
+    //   .nk-download-name = nama/resolusi
+    //   .nk-download-links a = link download
+    const downloads = [];
+    $(".nk-download-box .nk-download-row").each((_, row) => {
+      const quality = $(row).find(".nk-download-name").text().trim();
+      const links = [];
+      $(row).find(".nk-download-links a").each((_, a) => {
+        links.push({
+          label: $(a).text().trim(),   // "KrakenFiles", "Mp4Upload", dll
+          href: $(a).attr("href") || "",
+        });
+      });
+      if (quality || links.length) downloads.push({ quality, links });
+    });
+ 
+    // ── Navigasi prev / next ──────────────────────────────────────────────────
+    // Struktur: .nk-episode-nav (kosong di halaman ini, tapi strukturnya ada)
+    const prevEl = $(".nk-episode-nav .nav-previous, .nav-previous").first();
+    const nextEl = $(".nk-episode-nav .nav-next, .nav-next").first();
+ 
+    // ── All Episode (link seri) ───────────────────────────────────────────────
+    // Struktur: a.nk-player-series[href="/hentai/slug/"]
+    const allEpisodeHref = $("a.nk-player-series").attr("href") || "";
+ 
+    // ── Thumbnail ─────────────────────────────────────────────────────────────
+    // Struktur: .nk-featured-img img
+    const thumbnail =
+      $(".nk-featured-img img").attr("src") ||
+      $("meta[property='og:image']").attr("content") ||
+      "";
+ 
+    // ── Judul ─────────────────────────────────────────────────────────────────
+    // Struktur: .nk-post-header h1
+    const entryTitle = $(".nk-post-header h1").text().trim();
+ 
+    // ── Tanggal ───────────────────────────────────────────────────────────────
+    // Struktur: .nk-post-header-meta span (teks: "Selasa, 5 Mei 2026")
+    // Tidak ada tag <time>, ambil dari span kedua
+    const dateMeta = $(".nk-post-header-meta span").eq(1).text().trim();
+ 
+    // ── Info konten (sinopsis, genre, producer, durasi, size) ─────────────────
+    // Struktur: .konten p
+    const synopsis = $(".konten p").first().text().trim();
+ 
+    const genreRaw = $(".konten p:contains('Genre')").text().replace("Genre :", "").trim();
+    const genres = genreRaw
+      ? genreRaw.split(",").map((g) => g.trim()).filter(Boolean)
+      : [];
+ 
+    const producer = $(".konten p:contains('Producers')").text().replace("Producers :", "").trim();
+    const duration = $(".konten p:contains('Duration')").text().replace("Duration :", "").trim();
+    const size     = $(".konten p:contains('Size')").text().replace("Size :", "").trim();
+ 
+    return {
+      success: true,
+      data: {
+        entryTitle,
+        // Tidak ada .entry-title / .name di tema ini, pakai nk-post-header h1
+        title: entryTitle,
+        thumbnail,
+        date: {
+          raw: dateMeta,       // "Selasa, 5 Mei 2026"
+          formatted: dateMeta,
+        },
+        // Tidak ada author di halaman episode
+        author: "",
+        synopsis,
+        genres,
+        producer,
+        duration,
+        size,
+        players,
+        downloads,
+        prev: (() => {
+          const hasDismiss = prevEl.find(".dashicons-dismiss").length > 0;
+          return slugFromHref(hasDismiss ? "" : prevEl.find("a").attr("href") || "");
+        })(),
+        next: (() => {
+          const hasDismiss = nextEl.find(".dashicons-dismiss").length > 0;
+          return slugFromHref(hasDismiss ? "" : nextEl.find("a").attr("href") || "");
+        })(),
+        allEpisode: allEpisodeHref
+          ? allEpisodeHref.replace(/\/$/, "").split("/").filter(Boolean).pop()
+          : "",
+      },
+    };
+  } catch (err) {
+    return { success: false, message: "Gagal scrape episode: " + err.message };
+  }
+}
+ 
+
+function buildAnimeUrls(slug) {
+  return `${BASE_URLs}/hentai/${slug}/`;
+  // hasil: https://nekopoi.care/hentai/chimimonryou/
+}
+// ─── Scraper: Halaman Anime (daftar episode) ──────────────────────────────────
+// ─── Scraper: Anime Detail ────────────────────────────────────────────────────
+async function scrapeNekopoiDetail(url) {
+  try {
+    const html = await fetchHtml(url);
+    const $ = cheerio.load(html);
+ 
+    // ── Poster / Thumbnail ────────────────────────────────────────────────────
+    // Struktur: .nk-series-poster (background-image style)
+    const posterStyle = $(".nk-series-poster").attr("style") || "";
+    const posterMatch = posterStyle.match(/url\(['"]?(.*?)['"]?\)/);
+    const thumbnail = posterMatch ? posterMatch[1] : "";
+ 
+    // ── Judul ─────────────────────────────────────────────────────────────────
+    // Struktur: .nk-series-info h2
+    const title = $(".nk-series-info h2")
+      .clone()
+      .children()
+      .remove()
+      .end()
+      .text()
+      .trim()
+      .replace(/^Unduh\s+[""]|[""].*$/g, "")
+      .trim();
+ 
+    // ── Synopsis ──────────────────────────────────────────────────────────────
+    // Struktur: .nk-series-synopsis p (skip div.nk-latest-episode)
+    const synopsis = $(".nk-series-synopsis p").text().trim();
+ 
+    // ── Meta list ─────────────────────────────────────────────────────────────
+    // Struktur: .nk-series-meta-list ul li
+    // Format: <b>Key</b>: value
+    const meta = {};
+    $(".nk-series-meta-list ul li").each((_, el) => {
+      const key = $(el).find("b").text().trim().replace(":", "").toLowerCase();
+      // Ambil teks setelah <b>, strip leading ": "
+      const val = $(el).clone().children("b").remove().end().text().trim().replace(/^:\s*/, "");
+      if (key) meta[key] = val;
+    });
+ 
+    // Genre dari link di dalam meta list
+    const genres = [];
+    $(".nk-series-meta-list ul li").filter((_, el) => {
+      return $(el).find("b").text().toLowerCase().includes("genre");
+    }).find("a").each((_, a) => {
+      genres.push({
+        name: $(a).text().trim(),
+        slug: slugFromHref($(a).attr("href") || ""),
+      });
+    });
+ 
+    // ── Episode terbaru (dari .nk-latest-episode) ─────────────────────────────
+    // Struktur: .nk-latest-episode .latestepisode + .latestnow a
+    const latestEpisodeLabel = $(".latestepisode").text().trim();  // "Episode 1"
+    const latestEpisodeHref  = $(".latestnow a").attr("href") || "";
+ 
+    // ── Daftar Episode ────────────────────────────────────────────────────────
+    // Struktur: .nk-episode-grid ul li a.nk-episode-card
+    const episodeList = [];
+    $(".nk-episode-grid ul li").each((_, el) => {
+      const a     = $(el).find("a.nk-episode-card");
+      const href  = a.attr("href") || "";
+ 
+      // Thumb dari background-image style
+      const thumbStyle = a.find(".nk-episode-card-thumb").attr("style") || "";
+      const thumbMatch = thumbStyle.match(/url\(['"]?(.*?)['"]?\)/);
+      const thumb = thumbMatch ? thumbMatch[1] : "";
+ 
+      episodeList.push({
+        slug:  slugFromHref(href),
+        label: a.find(".nk-episode-badge").text().trim(),   // "Ep 1"
+        title: a.find(".nk-episode-card-title").text().trim(),
+        date:  a.find(".nk-episode-card-date").text().trim(),
+        thumbnail: thumb,
+        href,
+      });
+    });
+ 
+    // First & last episode
+    const firstEpisode = episodeList[episodeList.length - 1] || null;
+    const lastEpisode  = episodeList[0] || null;
+ 
+    return {
+      success: true,
+      data: {
+        title,
+        thumbnail,
+        // Meta dari .nk-series-meta-list
+        japaneseTitle: meta["judul jepang"] || "",
+        type:          meta["jenis"] || "",
+        totalEpisodes: meta["episode"] || "",
+        status:        meta["status"] || "",
+        aired:         meta["tayang"] || "",
+        producer:      meta["produser"] || "",
+        duration:      meta["durasi"] || "",
+        score:         meta["skor"] || "",
+        genres,
+        synopsis,
+        latestEpisode: {
+          label: latestEpisodeLabel,
+          slug:  slugFromHref(latestEpisodeHref),
+          href:  latestEpisodeHref,
+        },
+        firstEpisode,
+        lastEpisode,
+        // Index 0 = episode terbaru, index terakhir = episode pertama
+        episodeList,
+      },
+    };
+  } catch (err) {
+    return { success: false, message: "Gagal scrape detail: " + err.message };
+  }
+}
+
+
+function buildTerbaruUrl(page = 1) {
+  if (page <= 1) return `${BASE_URLs}/category/hentai/`;
+  return `${BASE_URLs}/category/hentai/page/${page}/`;
+}
+
+function slugFromHrefs(href = "") {
+  if (!href) return "";
+  return href.replace(/\/$/, "").split("/").filter(Boolean).pop() || "";
+}
+
+// ─── Scraper: Terbaru ─────────────────────────────────────────────────────────
+async function scrapeNekopoiTerbaru(url) {
+  try {
+    const html = await fetchHtml(url);
+    const $ = cheerio.load(html);
+ 
+    // Pagination info
+    // Struktur: .nav-links .page-numbers
+    const currentPage = parseInt($(".page-numbers.current").text().trim()) || 1;
+    const lastPageEl = $(".page-numbers:not(.next):not(.prev):not(.dots)").last();
+    const totalPages = parseInt(lastPageEl.text().trim()) || 1;
+    const hasNext = $("a.next.page-numbers").length > 0;
+    const hasPrev = $("a.prev.page-numbers").length > 0;
+ 
+    const items = [];
+ 
+    // Struktur: .nk-search-results ul li a.nk-search-item
+    $(".nk-search-results ul li").each((_, el) => {
+      const a    = $(el).find("a.nk-search-item");
+      const href = a.attr("href") || "";
+      const slug = slugFromHrefs(href);
+ 
+      // Thumbnail dari background-image style
+      const thumbStyle = a.find(".nk-search-thumb").attr("style") || "";
+      const thumbMatch = thumbStyle.match(/url\(['"]?(.*?)['"]?\)/);
+      const thumbnail  = thumbMatch ? thumbMatch[1] : "";
+ 
+      const title = a.find("h2").text().trim();
+      const desc  = a.find(".nk-search-desc").text().trim();
+ 
+      // Extract episode number dari judul
+      // Contoh: "Episode 1", "Episode 3", dll
+      const epMatch = title.match(/episode\s+(\d+)/i);
+      const latestEpisode = epMatch ? parseInt(epMatch[1]) : null;
+ 
+      // Extract tag prefix: [NEW Release], [UNCENSORED], [4K], [BATCH], [PREVIEW]
+      const tagMatch = title.match(/^\[([^\]]+)\]/);
+      const tag = tagMatch ? tagMatch[1] : "";
+ 
+      items.push({
+        title,
+        tag,
+        thumbnail,
+        slug,
+        latestEpisode,
+        desc,
+        url: href,
+      });
+    });
+ 
+    return {
+      success: true,
+      total: items.length,
+      pagination: {
+        currentPage,
+        totalPages,
+        hasNext,
+        hasPrev,
+        nextPage: hasNext ? currentPage + 1 : null,
+        prevPage: hasPrev ? currentPage - 1 : null,
+      },
+      data: items,
+    };
+  } catch (err) {
+    return { success: false, message: "Gagal scrape terbaru: " + err.message };
+  }
+}
+
+
+function buildSearchUrl(query, page = 1) {
+  const encoded = encodeURIComponent(query);
+  if (page <= 1) return `${BASE_URLs}/search/${encoded}/`;
+  return `${BASE_URLs}/search/${encoded}/page/${page}/`;
+}
+
+async function scrapeNekopoiSearch(query, page = 1) {
+  try {
+    const url = buildSearchUrl(query, page);
+    const html = await fetchHtml(url);
+    const $ = cheerio.load(html);
+
+    const items = [];
+
+    $(".nk-search-results ul li").each((_, el) => {
+      const a = $(el).find("a.nk-search-item");
+      const href = a.attr("href") || "";
+      const slug = slugFromHrefs(href);
+
+      // Thumbnail dari background-image
+      const thumbStyle = a.find(".nk-search-thumb").attr("style") || "";
+      const thumbMatch = thumbStyle.match(/url\(['"]?(.*?)['"]?\)/);
+      const thumbnail = thumbMatch ? thumbMatch[1] : "";
+
+      const title = a.find("h2").text().trim();
+      const desc = a.find(".nk-search-desc").text().trim();
+
+      // Extract tag prefix: [NEW Release], [UNCENSORED], [4K], [3D], [L2D], dll
+      const tagMatch = title.match(/^\[([^\]]+)\]/);
+      const tag = tagMatch ? tagMatch[1] : "";
+
+      // Extract episode number dari judul
+      const epMatch = title.match(/episode\s+(\d+)/i);
+      const latestEpisode = epMatch ? parseInt(epMatch[1]) : null;
+
+      items.push({
+        title,
+        tag,
+        thumbnail,
+        slug,
+        latestEpisode,
+        desc,
+        url: href,
+      });
+    });
+
+    // Pagination
+    const currentPage = parseInt($(".page-numbers.current").text().trim()) || page;
+    const lastPageEl = $(".nav-links .page-numbers:not(.next):not(.prev):not(.dots)").last();
+    const totalPages = parseInt(lastPageEl.text().trim()) || 1;
+    const hasNext = $("a.next.page-numbers").length > 0;
+    const hasPrev = $("a.prev.page-numbers").length > 0;
+
+    return {
+      success: true,
+      query,
+      pagination: {
+        currentPage,
+        totalPages,
+        hasNext,
+        hasPrev,
+        nextPage: hasNext ? currentPage + 1 : null,
+        prevPage: hasPrev ? currentPage - 1 : null,
+      },
+      total: items.length,
+      data: items,
+    };
+  } catch (err) {
+    return { success: false, message: "Gagal scrape search: " + err.message };
+  }
+}
+
+app.get("/nekopoi/search", async (req, res) => {
+  const { q, page } = req.query;
+
+  if (!q || q.trim().length < 2) {
+    return res.status(400).json({
+      success: false,
+      message: "Parameter 'q' minimal 2 karakter",
+    });
+  }
+
+  const pageNum = parseInt(page) || 1;
+  const cacheKey = `neko_search_${q.toLowerCase().replace(/\s+/g, "_")}_p${pageNum}`;
+  const cached = getCache(cacheKey);
+
+  if (cached) {
+    console.log(`✅ Cache hit: ${cacheKey}`);
+    return res.json(cached);
+  }
+
+  console.log(`🔍 Scraping nekopoi search: "${q}" page ${pageNum}`);
+
+  const result = await scrapeNekopoiSearch(q, pageNum);
+
+  if (result.success) {
+    setCache(cacheKey, result, 300); // cache 5 menit
+  }
+
+  res.json(result);
+});
+
+
+app.get("/nekopoi/terbaru", async (req, res) => {
+  const page = parseInt(req.query.page) || 1;
+  const cacheKey = `terbaru_${page}`;
+  const cached = getCache(cacheKey);
+
+  if (cached) {
+    console.log(`✅ Cache hit: ${cacheKey}`);
+    return res.json(cached);
+  }
+
+  console.log(`🔍 Scraping terbaru page ${page}...`);
+
+  const url = buildTerbaruUrl(page);
+
+  const result = await scrapeNekopoiTerbaru(url);
+
+  if (result.success) {
+    setCache(cacheKey, result, 120); // cache 2 menit
+  }
+
+  res.json(result);
+});
+
+
+app.get("/nekopoi/episode/:slug", async (req, res) => {
+  const { slug } = req.params;
+  if (!slug)
+    return res.status(400).json({ success: false, message: "Slug diperlukan" });
+
+  const cacheKey = `nekopoi_episode_${slug}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`✅ Cache hit: ${cacheKey}`);
+    return res.json(cached);
+  }
+
+  console.log(`🔍 Scraping episode: ${slug}`);
+  const result = await scrapeNekopoiEpisode(buildUrl(slug));
+
+  if (result.success) setCache(cacheKey, result, 60 * 60 * 24 * 7); // ✅ cache 7 hari (dalam detik)
+
+  res.json(result);
+});
+
+
+app.get("/nekopoi/detail/:slug", async (req, res) => {
+  const { slug } = req.params;
+
+  if (!slug) {
+    return res.status(400).json({
+      success: false,
+      message: "Slug diperlukan",
+    });
+  }
+
+  const cacheKey = `nekopoi_detail_${slug}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`✅ Cache hit: ${cacheKey}`);
+    return res.json(cached);
+  }
+
+  console.log(`🔍 Scraping detail: ${slug}`);
+
+  const result = await scrapeNekopoiDetail(buildAnimeUrls(slug));
+
+  if (result.success) setCache(cacheKey, result, 60 * 60 * 24); // ✅ cache 1 hari (dalam detik)
+
+  res.json(result);
+});
 
 
 // ================= ROUTE: SEARCH WITH PAGE =================
