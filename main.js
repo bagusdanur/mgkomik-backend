@@ -823,4 +823,26 @@ app.get("/animeid/episode/:slug", async (req, res) => {
   res.json(result);
 });
 
+app.get("/neko/image", async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).send("url required");
+
+  try {
+    const response = await axios.get(url, {
+      responseType: "arraybuffer",
+      timeout: 10000,
+      headers: {
+        Referer: "https://nekopoi.care/",
+        "User-Agent": randomUA(),
+      },
+    });
+
+    res.set("Content-Type", response.headers["content-type"] || "image/jpeg");
+    res.set("Cache-Control", "public, max-age=604800"); // cache 7 hari
+    res.send(response.data);
+  } catch (err) {
+    res.status(404).send("image not found");
+  }
+});
+
 app.listen(PORT, () => console.log(`🚀 Server jalan di http://localhost:${PORT}`));
