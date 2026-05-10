@@ -114,7 +114,7 @@ function nekoEpisodeUrl(slug) {
 }
 
 function nekoAnimeUrl(slug) {
-  return `${NEKO_BASE_URL}/hentai/${slug}/`;
+  return `${NEKO_BASE_URL}/${slug}/`;
 }
 
 function nekoTerbaruUrl(page = 1) {
@@ -698,6 +698,477 @@ async function scrapeNekopoiDetail(url) {
     return { success: false, message: "Gagal scrape detail: " + err.message };
   }
 }
+// ─────────────────────────────────────────────────────────────────────────────
+// ANICHIN CONFIG
+// ─────────────────────────────────────────────────────────────────────────────
+const ANICHIN_BASE_URL = "https://anichin.cafe";
+ 
+const axiosAnichin = axios.create({
+  timeout: 10000,
+  headers: {
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    Connection: "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+  },
+});
+ 
+async function fetchAnichin(url, retries = 2) {
+  try {
+    return await axiosAnichin.get(url, {
+      headers: {
+        "User-Agent": randomUA(),
+        Referer: ANICHIN_BASE_URL + "/",
+      },
+    });
+  } catch (err) {
+    if (retries <= 0) throw err;
+    const delay = err.response?.status === 403 ? 1500 : 500;
+    console.log(`🔁 Anichin Retry (${retries} left) [${err.response?.status || err.code}]: ${url}`);
+    await sleep(delay);
+    return fetchAnichin(url, retries - 1);
+  }
+}
+ 
+// ─────────────────────────────────────────────────────────────────────────────
+// ANICHIN SCRAPER - TERBARU (Latest Release only)
+// Semua page (1, 2, 3, dst) selalu render hothome + latesthome
+// Fix: SELALU pakai .releases.latesthome sebagai container anchor
+// ─────────────────────────────────────────────────────────────────────────────
+async function scrapeAnichinTerbaru(page = 1) {
+  try {
+    const url = page <= 1
+      ? `${ANICHIN_BASE_URL}/`
+      : `${ANICHIN_BASE_URL}/page/${page}/`;
+ 
+    const res = await fetchAnichin(url);
+    const $ = cheerio.load(res.data);
+ 
+    // Selalu ambil dari .releases.latesthome — ada di semua page
+    // Ini memastikan popular (hothome) tidak ikut masuk
+    const container = $(".bixbox .releases.latesthome").closest(".bixbox");
+ 
+    const items = [];
+    container.find("article.bs").each((i, el) => {
+      const anchor = $(el).find(".bsx > a");
+      const href = anchor.attr("href") || "";
+      const slug = href.replace(/\/$/, "").split("/").filter(Boolean).pop() || "";
+ 
+      const thumbnail =
+        anchor.find("img").attr("src") ||
+        anchor.find("img").attr("data-src") ||
+        "";
+ 
+      // Judul seri (buang h2 dari .tt)
+      const title = $(el)
+        .find(".bsx .tt")
+        .clone()
+        .children("h2")
+        .remove()
+        .end()
+        .text()
+        .trim();
+ 
+      // Judul episode lengkap
+      const episodeTitle = $(el).find("h2[itemprop='headline']").text().trim();
+ 
+      // Tipe: Donghua / Movie / ONA / dll
+      const type = anchor.find(".typez").text().trim();
+ 
+      // Label episode: "Ep 04" / "Ep 59 END" / "Movie"
+      const episodeLabel = anchor.find(".bt .epx").text().trim();
+      const epMatch = episodeLabel.match(/(\d+)/);
+      const episode = epMatch ? parseInt(epMatch[1]) : null;
+      const isEnd = /end/i.test(episodeLabel);
+      const isMovie = /movie/i.test(type);
+ 
+      // Sub / Dub
+      const subDub = anchor.find(".bt .sb").text().trim();
+ 
+      // Status: "Completed" atau "Ongoing"
+      const statusBadge = anchor.find(".limit .status").text().trim();
+      const status = statusBadge || "Ongoing";
+ 
+      items.push({
+        title,
+        episodeTitle,
+        slug,
+        url: href,
+        thumbnail,
+        type,
+        episode,
+        episodeLabel,
+        isEnd,
+        isMovie,
+        subDub,
+        status,
+      });
+    });
+ 
+    // Pagination — ambil dari .hpage dalam container latesthome
+    const hasNext = container.find(".hpage a.r").length > 0;
+    const hasPrev = container.find(".hpage a.l").length > 0;
+ 
+    return {
+      success: true,
+      page,
+      hasNext,
+      hasPrev,
+      nextPage: hasNext ? page + 1 : null,
+      prevPage: hasPrev ? page - 1 : null,
+      total: items.length,
+      data: items,
+    };
+  } catch (err) {
+    return { success: false, message: "Gagal scrape anichin terbaru: " + err.message };
+  }
+}
+
+async function scrapeAnichinEpisode(slug) {
+  try {
+    const url = `${ANICHIN_BASE_URL}/${slug}/`;
+    const res = await fetchAnichin(url);
+    const $ = cheerio.load(res.data);
+ 
+    // ── THUMBNAIL ─────────────────────────────────────────────────────────
+    const thumbnail = $(".megavid .tb img").attr("src") || "";
+ 
+    // ── JUDUL EPISODE ─────────────────────────────────────────────────────
+    const episodeTitle = $("h1.entry-title").text().trim();
+ 
+    // ── META (type, subDub, tanggal, author, seri) ────────────────────────
+    const type = $(".megavid .epx").clone().children(".lg").remove().end().text().trim();
+    const subDub = $(".megavid .epx .lg").text().trim();
+    const releasedOn = $(".megavid .updated").text().trim();
+    const author = $(".megavid .fn a").text().trim();
+    const seriesTitle = $(".megavid .year a[href*='/seri/']").text().trim();
+    const seriesSlug = ($(".megavid .year a[href*='/seri/']").attr("href") || "")
+      .replace(/\/$/, "").split("/").filter(Boolean).pop();
+ 
+    // ── PLAYERS (dari select option, decode base64) ────────────────────────
+    const players = [];
+    $("select.mirror option").each((i, el) => {
+      const val = $(el).attr("value") || "";
+      const label = $(el).text().trim();
+      if (!val || !label || label === "Select Video Server") return;
+ 
+      let iframeSrc = "";
+      try {
+        const decoded = Buffer.from(val, "base64").toString("utf-8");
+        const srcMatch = decoded.match(/src="([^"]+)"/);
+        iframeSrc = srcMatch ? srcMatch[1] : "";
+      } catch (e) {
+        iframeSrc = "";
+      }
+ 
+      players.push({
+        label,
+        index: parseInt($(el).attr("data-index")) || i + 1,
+        iframe: iframeSrc,
+      });
+    });
+ 
+    // Tambah player aktif dari embed_holder (bisa beda dengan option pertama)
+    const activeIframe = $("#pembed iframe").attr("src") || "";
+ 
+    // ── NAVIGASI EPISODE ──────────────────────────────────────────────────
+    const navEls = $(".naveps.bignav .nvs");
+ 
+    // Prev: nvs pertama (bukan nvsc), cek apakah ada <a> atau <span class="nolink">
+    const prevEl = navEls.eq(0);
+    const prevHref = prevEl.find("a").attr("href") || "";
+    const prev = prevHref
+      ? prevHref.replace(/\/$/, "").split("/").filter(Boolean).pop()
+      : null;
+ 
+    // All episodes: nvsc
+    const allEpisodeHref = $(".naveps.bignav .nvsc a").attr("href") || "";
+    const allEpisodeSlug = allEpisodeHref
+      ? allEpisodeHref.replace(/\/$/, "").split("/").filter(Boolean).pop()
+      : null;
+ 
+    // Next: nvs terakhir
+    const nextEl = navEls.eq(2);
+    const nextHref = nextEl.find("a").attr("href") || "";
+    const next = nextHref
+      ? nextHref.replace(/\/$/, "").split("/").filter(Boolean).pop()
+      : null;
+ 
+    // ── DOWNLOAD LINKS ────────────────────────────────────────────────────
+    // Struktur: .soraddlx > .soraurlx (berisi strong kualitas + link-link)
+    const downloads = [];
+    $(".soraddlx .soraurlx").each((i, el) => {
+      const quality = $(el).find("strong").text().trim();
+      const links = [];
+      $(el).find("a").each((j, a) => {
+        links.push({
+          label: $(a).text().trim(),
+          url: $(a).attr("href") || "",
+        });
+      });
+      if (quality) downloads.push({ quality, links });
+    });
+ 
+    // ── INFO SERI (dari .single-info) ─────────────────────────────────────
+    const seriesInfo = {};
+    $(".single-info .spe span").each((i, el) => {
+      const text = $(el).text().trim();
+      const colonIdx = text.indexOf(":");
+      if (colonIdx === -1) return;
+      const key = text.slice(0, colonIdx).trim().toLowerCase();
+      const val = $(el).clone().children("b").remove().end().text().replace(/^:\s*/, "").trim();
+      seriesInfo[key] = val;
+    });
+ 
+    const rating = $(".single-info .rating strong").text().replace("Rating", "").trim();
+ 
+    const genres = [];
+    $(".single-info .genxed a").each((i, el) => {
+      genres.push({
+        name: $(el).text().trim(),
+        slug: ($(el).attr("href") || "").replace(/\/$/, "").split("/").filter(Boolean).pop(),
+      });
+    });
+ 
+    const synopsis = $(".single-info .desc").clone().children(".colap").remove().end().text().trim();
+ 
+    const alternativeTitle = $(".single-info .alter").text().trim();
+ 
+    // ── RELATED EPISODES ──────────────────────────────────────────────────
+    const relatedEpisodes = [];
+    $(".bixbox:has(h3:contains('Related Episodes')) .stylefiv").each((i, el) => {
+      const a = $(el).find(".thumb a");
+      const href = a.attr("href") || "";
+      relatedEpisodes.push({
+        title: $(el).find(".inf h2 a").text().trim(),
+        slug: href.replace(/\/$/, "").split("/").filter(Boolean).pop(),
+        url: href,
+        thumbnail: $(el).find("img").attr("src") || "",
+        postedBy: $(el).find(".inf span").eq(0).text().replace("Posted by:", "").trim(),
+        releasedOn: $(el).find(".inf span").eq(1).text().replace("Released on:", "").trim(),
+      });
+    });
+ 
+    return {
+      success: true,
+      data: {
+        episodeTitle,
+        thumbnail,
+        type,
+        subDub,
+        releasedOn,
+        author,
+        series: {
+          title: seriesTitle,
+          slug: seriesSlug,
+        },
+        activeIframe,
+        players,
+        navigation: {
+          prev,
+          allEpisode: allEpisodeSlug,
+          next,
+        },
+        downloads,
+        seriesInfo: {
+          ...seriesInfo,
+          rating,
+          alternativeTitle,
+          genres,
+          synopsis,
+        },
+        relatedEpisodes,
+      },
+    };
+  } catch (err) {
+    return { success: false, message: "Gagal scrape anichin episode: " + err.message };
+  }
+}
+
+async function scrapeAnichinSeri(slug) {
+  try {
+    const url = `${ANICHIN_BASE_URL}/seri/${slug}/`;
+    const res = await fetchAnichin(url);
+    const $ = cheerio.load(res.data);
+ 
+    // ── THUMBNAIL ─────────────────────────────────────────────────────────
+    const thumbnail = $(".bigcontent .thumbook .thumb img").attr("src") || "";
+ 
+    // ── JUDUL ─────────────────────────────────────────────────────────────
+    const title = $("h1.entry-title").text().trim();
+    const alternativeTitle = $(".ninfo .alter").text().trim();
+ 
+    // ── RATING ────────────────────────────────────────────────────────────
+    const rating = $(".thumbook .rating strong").text().replace("Rating", "").trim();
+ 
+    // ── META INFO (Status, Network, Studio, dll) ──────────────────────────
+    const meta = {};
+    $(".infox .spe span").each((i, el) => {
+      const fullText = $(el).text().trim();
+      const boldText = $(el).find("b").text().replace(":", "").trim();
+      if (!boldText) return;
+      const val = $(el).clone().children("b").remove().end().text().replace(/^:\s*/, "").trim();
+      meta[boldText.toLowerCase()] = val;
+    });
+ 
+    // ── TANGGAL ───────────────────────────────────────────────────────────
+    const releasedOn = $(".infox .spe time[itemprop='datePublished']").text().trim();
+    const updatedOn = $(".infox .spe time[itemprop='dateModified']").text().trim();
+ 
+    // ── GENRES ────────────────────────────────────────────────────────────
+    const genres = [];
+    $(".infox .genxed a").each((i, el) => {
+      genres.push({
+        name: $(el).text().trim(),
+        slug: ($(el).attr("href") || "").replace(/\/$/, "").split("/").filter(Boolean).pop(),
+      });
+    });
+ 
+    // ── SYNOPSIS ──────────────────────────────────────────────────────────
+    const synopsis = $(".bixbox.synp .entry-content p").text().trim();
+ 
+    // ── FIRST & LAST EPISODE ──────────────────────────────────────────────
+    const firstEpEl = $(".lastend .inepcx").eq(0);
+    const lastEpEl = $(".lastend .inepcx").eq(1);
+ 
+    const lastEpHref = lastEpEl.find("a").attr("href") || "";
+    const lastEpSlug = lastEpHref.replace(/\/$/, "").split("/").filter(Boolean).pop() || null;
+ 
+    // First episode: anichin pakai JS untuk set href-nya (ts_set_first_ep),
+    // href di HTML selalu "#", jadi kita derive dari episode list saja
+    const firstEpLabel = firstEpEl.find(".epcur").text().trim();
+    const lastEpLabel = lastEpEl.find(".epcur").text().trim();
+ 
+    // ── EPISODE LIST ──────────────────────────────────────────────────────
+    // Selector: .eplister ul li
+    const episodeList = [];
+    $(".eplister ul li").each((i, el) => {
+      const a = $(el).find("a");
+      const href = a.attr("href") || "";
+      const epSlug = href.replace(/\/$/, "").split("/").filter(Boolean).pop() || "";
+      const epNum = $(el).find(".epl-num").text().trim();
+      const epTitle = $(el).find(".epl-title").text().trim();
+      const epSub = $(el).find(".epl-sub span").text().trim();
+      const epDate = $(el).find(".epl-date").text().trim();
+      const isEnd = /end/i.test(epNum);
+ 
+      episodeList.push({
+        num: epNum,
+        isEnd,
+        title: epTitle,
+        slug: epSlug,
+        url: href,
+        sub: epSub,
+        date: epDate,
+      });
+    });
+ 
+    // Episode list dari HTML urutan DESC (terbaru dulu), balik jadi ASC
+    const episodeListAsc = [...episodeList].reverse();
+ 
+    return {
+      success: true,
+      data: {
+        title,
+        alternativeTitle,
+        thumbnail,
+        rating,
+        synopsis,
+        info: {
+          status: meta["status"] || "",
+          network: meta["network"] || "",
+          studio: meta["studio"] || "",
+          released: meta["released"] || "",
+          duration: meta["duration"] || "",
+          season: meta["season"] || "",
+          country: meta["country"] || "",
+          type: meta["type"] || "",
+          totalEpisodes: parseInt(meta["episodes"]) || null,
+          postedBy: meta["posted by"] || "",
+          releasedOn,
+          updatedOn,
+        },
+        genres,
+        latestEpisode: {
+          label: lastEpLabel,
+          slug: lastEpSlug,
+          url: lastEpHref,
+        },
+        firstEpisodeLabel: firstEpLabel,
+        totalEpisodesFound: episodeList.length,
+        // episodeList: terbaru dulu (urutan dari HTML asli)
+        episodeList,
+        // episodeListAsc: dari ep 1 ke atas
+        episodeListAsc,
+      },
+    };
+  } catch (err) {
+    return { success: false, message: "Gagal scrape anichin seri: " + err.message };
+  }
+}
+ 
+app.get("/anichin/detail/:slug", async (req, res) => {
+  const { slug } = req.params;
+  if (!slug) {
+    return res.status(400).json({ success: false, message: "Slug diperlukan" });
+  }
+ 
+  const cacheKey = `anichin_seri_${slug}`;
+  const cached = getCache(cacheKey);
+  if (cached) return res.json(cached);
+ 
+  const result = await scrapeAnichinSeri(slug);
+ 
+  // Cache 10 menit untuk seri ongoing, 1 jam untuk completed
+  if (result.success) {
+    const ttl = result.data.info.status === "Completed" ? 3600 : 600;
+    setCache(cacheKey, result, ttl);
+  }
+ 
+  res.json(result);
+});
+
+app.get("/anichin/episode/:slug", async (req, res) => {
+  const { slug } = req.params;
+  if (!slug) {
+    return res.status(400).json({ success: false, message: "Slug diperlukan" });
+  }
+ 
+  const cacheKey = `anichin_episode_${slug}`;
+  const cached = getCache(cacheKey);
+  if (cached) return res.json(cached);
+ 
+  const result = await scrapeAnichinEpisode(slug);
+ 
+  // Cache 10 menit — episode jarang berubah setelah upload
+  if (result.success) setCache(cacheKey, result, 600);
+ 
+  res.json(result);
+});
+ 
+// ─────────────────────────────────────────────────────────────────────────────
+// ROUTE: GET /anichin/terbaru
+// ─────────────────────────────────────────────────────────────────────────────
+app.get("/anichin/terbaru", async (req, res) => {
+  const page = parseInt(req.query.page) || 1;
+ 
+  if (page < 1) {
+    return res.status(400).json({ success: false, message: "Page minimal 1" });
+  }
+ 
+  const cacheKey = `anichin_terbaru_p${page}`;
+  const cached = getCache(cacheKey);
+  if (cached) return res.json(cached);
+ 
+  const result = await scrapeAnichinTerbaru(page);
+ 
+  if (result.success) setCache(cacheKey, result, page === 1 ? 120 : 300);
+ 
+  res.json(result);
+});
+ 
+ 
 
 // ─────────────────────────────────────────────────────────────────────────────
 // NEKOPOI ROUTES
