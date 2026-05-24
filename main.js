@@ -1,4 +1,5 @@
 const axios = require("axios");
+const cloudscraper = require("cloudscraper");
 const cheerio = require("cheerio");
 const express = require("express");
 const app = express();
@@ -61,14 +62,62 @@ async function fetchRetry(url, options = {}, retries = 2) {
 // NEKOPOI CONFIG
 // ─────────────────────────────────────────────────────────────────────────────
 const NEKO_BASE_URL = "https://nekopoi.care";
-const NEKO_WORKER_URL = "https://sekte.ezcantik9.workers.dev";
+const NEKO_WORKER_URL = process.env.NEKO_WORKER_URL || "https://neko.ezcantik9.workers.dev/";
+
+function nekoHeaders(referer = NEKO_BASE_URL + "/") {
+  return {
+    "User-Agent": randomUA(),
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    Referer: referer,
+    Connection: "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+  };
+}
 
 async function fetchHtml(url) {
-  const { data } = await axios.get(
-    `${NEKO_WORKER_URL}?url=${encodeURIComponent(url)}`,
-    { timeout: 15000 }
-  );
-  return data;
+  const attempts = [];
+
+  if (NEKO_WORKER_URL) {
+    attempts.push(async () => {
+      const separator = NEKO_WORKER_URL.includes("?") ? "" : "?url=";
+      const proxyUrl = `${NEKO_WORKER_URL}${separator}${encodeURIComponent(url)}`;
+      const { data } = await axios.get(proxyUrl, {
+        timeout: 20000,
+        headers: nekoHeaders(NEKO_BASE_URL + "/"),
+      });
+      return data;
+    });
+  }
+
+  attempts.push(async () => {
+    const { data } = await axios.get(url, {
+      timeout: 20000,
+      headers: nekoHeaders(NEKO_BASE_URL + "/"),
+      maxRedirects: 5,
+    });
+    return data;
+  });
+
+  attempts.push(async () => {
+    return await cloudscraper.get(url, {
+      timeout: 20000,
+      headers: nekoHeaders(NEKO_BASE_URL + "/"),
+    });
+  });
+
+  const errors = [];
+  for (const attempt of attempts) {
+    try {
+      const html = await attempt();
+      if (typeof html === "string" && html.trim()) return html;
+    } catch (err) {
+      errors.push(err.response?.status || err.statusCode || err.code || err.message);
+    }
+  }
+
+  throw new Error(`Semua fetch Nekopoi gagal: ${errors.filter(Boolean).join(" -> ")}`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -124,8 +173,8 @@ function nekoTerbaruUrl(page = 1) {
 
 function nekoSearchUrl(query, page = 1) {
   const encoded = encodeURIComponent(query);
-  if (page <= 1) return `${NEKO_BASE_URL}/search/${encoded}/`;
-  return `${NEKO_BASE_URL}/search/${encoded}/page/${page}/`;
+  if (page <= 1) return `${NEKO_BASE_URL}/search/${encoded}`;
+  return `${NEKO_BASE_URL}/search/${encoded}/page/${page}`;
 }
 
 function nekoSlug(href = "") {

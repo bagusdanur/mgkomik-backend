@@ -1,6 +1,7 @@
 const axios = require("axios");
 const cheerio = require("cheerio");
 const express = require("express");
+const https = require("https");
 const app = express();
 const PORT = process.env.PORT || 3012;
 const cors = require("cors");
@@ -1151,6 +1152,1160 @@ const typeGenre = typeClass
   }
 }
 
+const DOUJINDESU_BASE_URL = "https://doujindesu.tv";
+const DOUJINDESU_PROXY_URL = "https://sekte.ezcantik9.workers.dev?url=";
+const DOUJINDESU_CF_IP = "104.26.8.62";
+const DOUJINDESU_IMAGE_PROBE_BATCH_SIZE = 16;
+const DOUJINDESU_IMAGE_CACHE_TTL = 1000 * 60 * 30;
+const doujindesuImageCache = new Map();
+const doujindesuCloudflareAgent = new https.Agent({
+  lookup: (hostname, options, callback) => {
+    if (hostname === "doujindesu.tv") {
+      if (options?.all) {
+        return callback(null, [{ address: DOUJINDESU_CF_IP, family: 4 }]);
+      }
+
+      return callback(null, DOUJINDESU_CF_IP, 4);
+    }
+
+    return require("dns").lookup(hostname, options, callback);
+  },
+});
+
+function doujindesuUrl(path = "/") {
+  if (!path) return "";
+  return path.startsWith("http") ? path : `${DOUJINDESU_BASE_URL}${path}`;
+}
+
+function doujindesuSlug(url, marker = "/manga/") {
+  const fullUrl = doujindesuUrl(url);
+  return fullUrl.split(marker)[1]?.split("?")[0]?.replace(/\/$/, "") || "";
+}
+
+function doujindesuPathSlug(url) {
+  try {
+    return new URL(doujindesuUrl(url)).pathname.split("/").filter(Boolean).pop() || "";
+  } catch {
+    return "";
+  }
+}
+
+function doujindesuNormalizeImageUrl(url = "") {
+  const value = String(url).trim();
+  if (!value || value.startsWith("data:")) return "";
+
+  try {
+    const imageUrl = new URL(value, DOUJINDESU_BASE_URL);
+    imageUrl.pathname = imageUrl.pathname
+      .split("/")
+      .map((segment) => encodeURIComponent(decodeURIComponent(segment)))
+      .join("/");
+
+    return imageUrl.href;
+  } catch {
+    return doujindesuUrl(value);
+  }
+}
+
+function doujindesuChapterRange(number, size = 10) {
+  const chapterNumber = parseInt(number, 10);
+  if (!chapterNumber) return "";
+
+  const start = Math.floor((chapterNumber - 1) / size) * size + 1;
+  return `${start}-${start + size - 1}`;
+}
+
+async function doujindesuFetch(url) {
+  const targetUrl = doujindesuUrl(url);
+  const proxyUrl = `${DOUJINDESU_PROXY_URL}${encodeURIComponent(targetUrl)}`;
+
+  const { data } = await axios.get(proxyUrl, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
+      Referer: DOUJINDESU_BASE_URL,
+    },
+    timeout: 20000,
+  });
+
+  return data;
+}
+
+async function doujindesuPost(url, payload = {}, referer = DOUJINDESU_BASE_URL) {
+  const targetUrl = doujindesuUrl(url);
+  const params = new URLSearchParams();
+
+  Object.entries(payload).forEach(([key, value]) => {
+    params.append(key, value);
+  });
+
+  const headers = {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+    Accept: "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    "X-Requested-With": "XMLHttpRequest",
+    Origin: DOUJINDESU_BASE_URL,
+    Referer: referer || DOUJINDESU_BASE_URL,
+  };
+
+  try {
+    const pageRes = await axios.get(referer, {
+      headers: {
+        "User-Agent": headers["User-Agent"],
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": headers["Accept-Language"],
+        Referer: DOUJINDESU_BASE_URL,
+      },
+      httpsAgent: doujindesuCloudflareAgent,
+      timeout: 20000,
+    });
+    const cookies = pageRes.headers["set-cookie"] || [];
+    const { data } = await axios.post(targetUrl, params, {
+      headers: {
+        ...headers,
+        Cookie: cookies.map((cookie) => cookie.split(";")[0]).join("; "),
+      },
+      httpsAgent: doujindesuCloudflareAgent,
+      timeout: 20000,
+    });
+
+    return data;
+  } catch (err) {
+    const proxyUrl =
+      `${DOUJINDESU_PROXY_URL}${encodeURIComponent(targetUrl)}` +
+      `&referer=${encodeURIComponent(referer || DOUJINDESU_BASE_URL)}`;
+    const { data } = await axios.post(proxyUrl, params, {
+      headers,
+      timeout: 20000,
+    });
+
+    return data;
+  }
+}
+
+async function doujindesuImageExists(image) {
+  try {
+    const response = await axios.get(image, {
+      headers: {
+        Range: "bytes=0-0",
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        Referer: DOUJINDESU_BASE_URL,
+      },
+      responseType: "arraybuffer",
+      timeout: 8000,
+      validateStatus: () => true,
+    });
+
+    return response.status >= 200 && response.status < 400;
+  } catch {
+    return false;
+  }
+}
+
+function doujindesuTitleCandidates(...titles) {
+  const candidates = [];
+  const pushCandidate = (value) => {
+    const title = value
+      .replace(/\s+/g, " ")
+      .replace(/[.\u3002]+$/g, "")
+      .trim();
+
+    if (title && !candidates.includes(title)) candidates.push(title);
+  };
+
+  titles.filter(Boolean).forEach((title) => {
+    pushCandidate(title);
+    pushCandidate(title.split(" - ")[0]);
+    pushCandidate(title.split("...")[0]);
+    pushCandidate(title.split("\u2026")[0]);
+  });
+
+  return candidates.slice(0, 8);
+}
+
+async function collectDoujindesuImages(basePath, filePrefix) {
+  const images = [];
+  const maxProbe = 300;
+
+  const buildImage = (page) =>
+    `https://desu.photos/storage/uploads/${basePath}/` +
+    encodeURIComponent(`${filePrefix} (${page}).webp`);
+
+  for (let start = 1; start <= maxProbe; start += DOUJINDESU_IMAGE_PROBE_BATCH_SIZE) {
+    const pages = Array.from(
+      { length: Math.min(DOUJINDESU_IMAGE_PROBE_BATCH_SIZE, maxProbe - start + 1) },
+      (_, index) => start + index,
+    );
+    const results = await Promise.all(
+      pages.map(async (page) => {
+        const image = buildImage(page);
+        return {
+          page,
+          image,
+          exists: await doujindesuImageExists(image),
+        };
+      }),
+    );
+    const hits = results
+      .filter((result) => result.exists)
+      .sort((a, b) => a.page - b.page);
+
+    if (!hits.length) break;
+
+    images.push(...hits.map((result) => result.image));
+
+    if (hits[hits.length - 1].page < pages[pages.length - 1]) break;
+  }
+
+  return images;
+}
+
+async function probeDoujindesuDoujinshiImages(seriesTitle, chapterTitle) {
+  const titleCandidates = doujindesuTitleCandidates(seriesTitle, chapterTitle);
+
+  for (const title of titleCandidates) {
+    const encodedTitle = encodeURIComponent(title);
+    const numbers = Array.from({ length: 30 }, (_, index) => index + 1);
+    const firstImageResults = await Promise.all(
+      numbers.map(async (number) => {
+        const firstImage =
+          `https://desu.photos/storage/uploads/DOUJINSHI/${encodedTitle}/` +
+          encodeURIComponent(`${number} (1).webp`);
+
+        return {
+          number,
+          exists: await doujindesuImageExists(firstImage),
+        };
+      }),
+    );
+    const match = firstImageResults.find((result) => result.exists);
+
+    if (match) {
+      return collectDoujindesuImages(`DOUJINSHI/${encodedTitle}`, match.number);
+    }
+  }
+
+  return [];
+}
+
+async function probeDoujindesuChapterImages(seriesTitle, chapterTitle) {
+  const cacheKey = `${seriesTitle}::${chapterTitle}`;
+  const cached = doujindesuImageCache.get(cacheKey);
+
+  if (cached && Date.now() - cached.createdAt < DOUJINDESU_IMAGE_CACHE_TTL) {
+    return [...cached.images];
+  }
+
+  const chapterNumber = chapterTitle.match(/chapter\s*0*(\d+)/i)?.[1];
+  let images;
+
+  if (seriesTitle && chapterNumber) {
+    const encodedTitle = encodeURIComponent(seriesTitle);
+    const range = doujindesuChapterRange(chapterNumber);
+    const basePaths = [
+      `MANHWA/${encodedTitle}/${chapterNumber}`,
+      range ? `MANHWA/${encodedTitle}/${range}/${chapterNumber}` : "",
+    ].filter(Boolean);
+
+    for (const basePath of basePaths) {
+      images = await collectDoujindesuImages(basePath, chapterNumber);
+      if (images.length) break;
+    }
+  } else {
+    images = await probeDoujindesuDoujinshiImages(seriesTitle, chapterTitle);
+  }
+
+  doujindesuImageCache.set(cacheKey, {
+    createdAt: Date.now(),
+    images,
+  });
+
+  if (doujindesuImageCache.size > 200) {
+    const oldestKey = doujindesuImageCache.keys().next().value;
+    doujindesuImageCache.delete(oldestKey);
+  }
+
+  return [...images];
+}
+
+const SEKTE_BASE_URL = "https://sektedoujin.cc";
+const SEKTE_PROXY_URL = "https://sekte.ezcantik9.workers.dev?url=";
+
+function sekteUrl(path = "/") {
+  if (!path) return "";
+  if (path.startsWith("//")) return `https:${path}`;
+  return path.startsWith("http") ? path : `${SEKTE_BASE_URL}${path}`;
+}
+
+function sektePathSlug(url) {
+  try {
+    return new URL(sekteUrl(url)).pathname.split("/").filter(Boolean).pop() || "";
+  } catch {
+    return "";
+  }
+}
+
+function sekteDetailSlug(url) {
+  try {
+    return new URL(sekteUrl(url)).pathname.split("/").filter(Boolean).pop() || "";
+  } catch {
+    return "";
+  }
+}
+
+function sekteMangaSlug(url) {
+  try {
+    return new URL(sekteUrl(url)).pathname.split("/manga/")[1]?.split("/")[0] || "";
+  } catch {
+    return "";
+  }
+}
+
+function sekteSlugify(text = "") {
+  return String(text)
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function sekteChapterSlugFromTitle(mangaSlug, chapterTitle) {
+  const chapterSlug = sekteSlugify(chapterTitle);
+  if (!mangaSlug || !chapterSlug) return "";
+
+  return chapterSlug.startsWith(mangaSlug)
+    ? chapterSlug
+    : `${mangaSlug}-${chapterSlug}`;
+}
+
+function sekteNormalizeImageUrl(url = "") {
+  const value = String(url).trim();
+  if (!value || value.startsWith("data:")) return "";
+
+  try {
+    const imageUrl = new URL(value, SEKTE_BASE_URL);
+    if (imageUrl.pathname.includes("/assets/img/readerarea.svg")) return "";
+
+    imageUrl.pathname = imageUrl.pathname
+      .split("/")
+      .map((segment) => encodeURIComponent(decodeURIComponent(segment)))
+      .join("/");
+
+    return imageUrl.href;
+  } catch {
+    return sekteUrl(value);
+  }
+}
+
+function parseSekteReaderData(html = "") {
+  const match = String(html).match(/ts_reader\.run\((\{[\s\S]*?\})\);/);
+  if (!match) return {};
+
+  try {
+    return JSON.parse(match[1]);
+  } catch {
+    return {};
+  }
+}
+
+async function sekteFetch(url) {
+  const targetUrl = sekteUrl(url);
+  const proxyUrl = `${SEKTE_PROXY_URL}${encodeURIComponent(targetUrl)}`;
+  const { data } = await axios.get(proxyUrl, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
+      Referer: SEKTE_BASE_URL,
+    },
+    timeout: 20000,
+  });
+
+  return data;
+}
+
+function parseSekteListItems($) {
+  const results = [];
+
+  $(".listupd .bs").each((_, el) => {
+    const item = $(el);
+    const anchor = item.find(".bsx > a[href*='/manga/']").first();
+    const detailPath = anchor.attr("href") || "";
+    const detailLink = sekteUrl(detailPath);
+    const title =
+      item.find(".tt").first().text().replace(/\s+/g, " ").trim() ||
+      anchor.attr("title")?.trim() ||
+      item.find("img").first().attr("title")?.trim() ||
+      "";
+    const image = sekteNormalizeImageUrl(
+      item.find(".limit img").first().attr("data-src") ||
+        item.find(".limit img").first().attr("src") ||
+        "",
+    );
+    const mangaSlug = sekteMangaSlug(detailPath);
+    const typeGenre =
+      (item.find(".limit .type").first().attr("class") || "")
+        .split(/\s+/)
+        .find((className) => className && className !== "type") ||
+      item.find(".limit .type").first().text().trim();
+    const chapterTitle = item.find(".epxs").first().text().replace(/\s+/g, " ").trim();
+    const chapterSlug = sekteChapterSlugFromTitle(mangaSlug, chapterTitle);
+    const status = item.find(".limit .status").first().text().replace(/\s+/g, " ").trim();
+    const score = item.find(".numscore").first().text().replace(/\s+/g, " ").trim();
+    const ratingStyle = item.find(".rtb span").first().attr("style") || "";
+    const ratingPercent = ratingStyle.match(/width\s*:\s*([^;]+)/i)?.[1] || "";
+
+    if (!title || !detailPath) return;
+
+    results.push({
+      source: "sektedoujin",
+      title,
+      slug: mangaSlug,
+      image,
+      detail_link: detailLink,
+      description: "",
+      type_genre: typeGenre || "",
+      genres: [],
+      info: status || typeGenre || chapterTitle || "",
+      update: chapterTitle,
+      chapter_terbaru: chapterTitle,
+      chapter_slug: chapterSlug,
+      chapter_link: chapterSlug ? sekteUrl(`/${chapterSlug}/`) : "",
+      status,
+      score,
+      rating: score,
+      rating_percent: ratingPercent,
+      is_colored: item.find(".colored").length > 0,
+      is_hot: item.find(".hotx").length > 0,
+    });
+  });
+
+  return results;
+}
+
+async function scrapeSekteTerbaru({ page = 1 } = {}) {
+  try {
+    const latestPath = page === 1 ? "/manga/?order=update" : `/manga/?page=${page}&order=update`;
+    const html = await sekteFetch(latestPath);
+    const $ = cheerio.load(html);
+    const results = parseSekteListItems($);
+
+    const pages = [];
+    $(".pagination a, .hpage a, .pagenav a").each((_, el) => {
+      const pageNumber = parseInt($(el).text().trim(), 10);
+      if (!Number.isNaN(pageNumber)) pages.push(pageNumber);
+    });
+    const hasNextPage = $(".hpage a.r, .pagination a.next").length > 0;
+
+    return {
+      success: true,
+      source: "sektedoujin.cc",
+      page,
+      totalPages: pages.length ? Math.max(...pages) : hasNextPage ? page + 1 : page,
+      total: results.length,
+      data: results,
+    };
+  } catch (err) {
+    console.error("Sekte terbaru error:", err.message);
+    return {
+      success: false,
+      source: "sektedoujin.cc",
+      page,
+      total: 0,
+      data: [],
+      message: "Gagal scrape halaman",
+      error: err.message,
+    };
+  }
+}
+
+async function scrapeSekteSearch(query, page = 1) {
+  try {
+    const searchPath =
+      page === 1
+        ? `/?s=${encodeURIComponent(query)}`
+        : `/?s=${encodeURIComponent(query)}&page=${page}`;
+    const html = await sekteFetch(searchPath);
+    const $ = cheerio.load(html);
+    const results = parseSekteListItems($).map((item) => ({
+      source: item.source,
+      title: item.title,
+      image: item.image,
+      detail_link: item.detail_link,
+      update: item.update,
+      slug: item.slug,
+      type_genre: item.type_genre,
+      status: item.status,
+      score: item.score,
+      genres: item.genres,
+    }));
+
+    const pages = [];
+    $(".pagination a, .hpage a, .pagenav a").each((_, el) => {
+      const pageNumber = parseInt($(el).text().trim(), 10);
+      if (!Number.isNaN(pageNumber)) pages.push(pageNumber);
+    });
+    const hasNextPage = $(".hpage a.r, .pagination a.next").length > 0;
+
+    return {
+      success: true,
+      total: results.length,
+      query,
+      page,
+      totalPages: pages.length ? Math.max(...pages) : hasNextPage ? page + 1 : page,
+      data: results,
+    };
+  } catch (err) {
+    console.error("Sekte search error:", err.message);
+    return {
+      success: false,
+      total: 0,
+      query,
+      page,
+      data: [],
+      message: "Gagal mengambil data pencarian",
+      error: err.message,
+    };
+  }
+}
+
+async function scrapeSekteDetail(slug) {
+  try {
+    const detailPath = slug.startsWith("http") ? slug : `/manga/${slug.replace(/^\/+/, "")}/`;
+    const detailLink = sekteUrl(detailPath);
+    const html = await sekteFetch(detailPath);
+    const $ = cheerio.load(html);
+    const article = $("article.hentry").first();
+    const title =
+      article.find("#titlemove h1.entry-title").first().text().replace(/\s+/g, " ").trim() ||
+      article.find("h1.entry-title").first().text().replace(/\s+/g, " ").trim();
+    const image = sekteNormalizeImageUrl(
+      article.find(".thumb img").first().attr("data-src") ||
+        article.find(".thumb img").first().attr("src") ||
+        "",
+    );
+    const alternativeTitle = article
+      .find("#titlemove .alternative")
+      .first()
+      .text()
+      .replace(/\s+/g, " ")
+      .trim();
+    const info = {};
+
+    article.find(".tsinfo .imptdt").each((_, el) => {
+      const row = $(el).clone();
+      row.find("i, a, span, time").remove();
+      const key = row.text().replace(/\s+/g, " ").trim();
+      const values = [
+        $(el).children("a").map((__, node) => $(node).text().replace(/\s+/g, " ").trim()).get(),
+        $(el).children("i").map((__, node) => $(node).text().replace(/\s+/g, " ").trim()).get(),
+        $(el).find(".author i").first().text().replace(/\s+/g, " ").trim(),
+        $(el).find(".ts-views-count").first().text().replace(/\s+/g, " ").trim(),
+      ]
+        .flat()
+        .filter(Boolean);
+      const value = [...new Set(values)].join(", ") ||
+        $(el).text().replace(/\s+/g, " ").replace(key, "").trim();
+
+      if (key) info[key.toLowerCase().replace(/\s+/g, "_")] = value;
+    });
+
+    const genres = article
+      .find(".mgen a")
+      .map((_, el) => $(el).text().replace(/\s+/g, " ").trim())
+      .get()
+      .filter(Boolean);
+    const synopsis = article
+      .find(".info-desc .entry-content")
+      .first()
+      .text()
+      .replace(/\s+/g, " ")
+      .trim();
+    const score = article.find(".rating .num").first().text().replace(/\s+/g, " ").trim();
+    const ratingCount = article.find(".rating-prc meta[itemprop='ratingCount']").attr("content") || "";
+    const ratingStyle = article.find(".rating .rtb span").first().attr("style") || "";
+    const ratingPercent = ratingStyle.match(/width\s*:\s*([^;]+)/i)?.[1] || "";
+
+    const chapters = [];
+    article.find("#chapterlist li").each((_, el) => {
+      const chapter = $(el);
+      const chapterPath = chapter.find(".eph-num a").first().attr("href") || "";
+      const chapterTitle = chapter.find(".chapternum").first().text().replace(/\s+/g, " ").trim();
+      const date = chapter.find(".chapterdate").first().text().replace(/\s+/g, " ").trim();
+      const chapterNumber = String(chapter.attr("data-num") || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      const downloadPath = chapter.find(".dt a.dload").first().attr("href") || "";
+
+      if (!chapterTitle && !chapterPath) return;
+
+      chapters.push({
+        title: chapterTitle,
+        chapter: chapterNumber,
+        slug: sektePathSlug(chapterPath),
+        link: sekteUrl(chapterPath),
+        date,
+        is_new: false,
+        download_link: downloadPath,
+      });
+    });
+
+    const latestChapter = chapters[0] || null;
+    const firstChapter = chapters[chapters.length - 1] || null;
+    chapters.reverse();
+
+    return {
+      success: true,
+      data: {
+        source: "sektedoujin",
+        title,
+        slug: sekteMangaSlug(detailLink) || sekteDetailSlug(detailLink),
+        thumbnail: image,
+        image,
+        detail_link: detailLink,
+        alternative_title: alternativeTitle,
+        type: info.type || "",
+        type_genre: info.type || "",
+        status: info.status || "",
+        Pengarang: info.author || "",
+        Umur: "",
+        Konsep: "",
+        series: title,
+        author: info.author || "",
+        artist: info.artist || "",
+        posted_by: info.posted_by || "",
+        posted_on: info.posted_on || "",
+        updated_on: info.updated_on || "",
+        views: info.views || "",
+        rating: score,
+        rating_count: ratingCount,
+        rating_percent: ratingPercent,
+        is_colored: article.find(".thumb .colored").length > 0,
+        genres,
+        synopsis,
+        warning: article.find(".alr").first().text().replace(/\s+/g, " ").trim(),
+        info: latestChapter?.date || info.updated_on || info.posted_on || "",
+        chapter_awal: firstChapter?.title || "",
+        chapter_terbaru: latestChapter?.title || "",
+        total_chapter: chapters.length,
+        total_chapters: chapters.length,
+        chapters,
+      },
+    };
+  } catch (err) {
+    console.error("Sekte detail error:", err.message);
+    return {
+      success: false,
+      source: "sektedoujin",
+      message: "Gagal scrape detail",
+      error: err.message,
+    };
+  }
+}
+
+async function scrapeSekteChapter(slug) {
+  try {
+    const chapterPath = slug.startsWith("http") ? slug : `/${slug.replace(/^\/+/, "")}/`;
+    const chapterLink = sekteUrl(chapterPath);
+    const html = await sekteFetch(chapterPath);
+    const $ = cheerio.load(html);
+    const article = $("article.hentry").first();
+    const readerData = parseSekteReaderData(html);
+
+    const title = article
+      .find("h1.entry-title")
+      .first()
+      .text()
+      .replace(/\s+/g, " ")
+      .trim();
+    const seriesEl = article.find(".allc a[href*='/manga/']").first();
+    const seriesTitle = seriesEl.text().replace(/\s+/g, " ").trim();
+    const seriesLink = sekteUrl(seriesEl.attr("href") || "");
+    const mangaId = sekteDetailSlug(seriesLink);
+    const chapterSlug = sektePathSlug(chapterPath);
+    const date =
+      article.find("time.entry-date").first().text().replace(/\s+/g, " ").trim() ||
+      article.find("time.entry-date").first().attr("datetime") ||
+      "";
+    const description = article
+      .find(".chdesc")
+      .first()
+      .text()
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const navTop = article.find(".chnav.ctop").first();
+    const prevAnchor = navTop.find(".ch-prev-btn").first();
+    const nextAnchor = navTop.find(".ch-next-btn").first();
+    const domPrevPath = prevAnchor.hasClass("disabled") ? "" : prevAnchor.attr("href") || "";
+    const domNextPath = nextAnchor.hasClass("disabled") ? "" : nextAnchor.attr("href") || "";
+    const prevPath = readerData.prevUrl || (domPrevPath.startsWith("#") ? "" : domPrevPath);
+    const nextPath = readerData.nextUrl || (domNextPath.startsWith("#") ? "" : domNextPath);
+    const downloadLink = sekteUrl(navTop.find(".dlx a").first().attr("href") || "");
+
+    const imageSet = new Set();
+    article.find("#readerarea img").each((_, el) => {
+      const img = $(el);
+      [
+        img.attr("data-src"),
+        img.attr("data-lazy-src"),
+        img.attr("data-original"),
+        img.attr("src"),
+      ]
+        .map(sekteNormalizeImageUrl)
+        .filter(Boolean)
+        .forEach((image) => imageSet.add(image));
+    });
+
+    (readerData.sources || []).forEach((source) => {
+      (source.images || [])
+        .map(sekteNormalizeImageUrl)
+        .filter(Boolean)
+        .forEach((image) => imageSet.add(image));
+    });
+
+    const images = [...imageSet];
+    const totalPages =
+      (readerData.sources || []).reduce(
+        (max, source) => Math.max(max, Array.isArray(source.images) ? source.images.length : 0),
+        0,
+      ) ||
+      parseInt(
+        article
+          .find(".ts-select-paged option")
+          .last()
+          .text()
+          .split("/")
+          .pop(),
+        10,
+      ) ||
+      images.length;
+
+    return {
+      success: true,
+      source: "sektedoujin",
+      mangaId,
+      chapterSlug,
+      currentChapter: title,
+      title,
+      slug: chapterSlug,
+      chapter_id: (article.attr("id") || "").replace(/^post-/, ""),
+      total_pages: totalPages,
+      image_count: images.length,
+      totalImages: images.length,
+      chapter_link: chapterLink,
+      series: {
+        title: seriesTitle,
+        slug: mangaId,
+        link: seriesLink,
+      },
+      date,
+      description,
+      prev: prevPath ? sektePathSlug(prevPath) : "",
+      prev_link: prevPath ? sekteUrl(prevPath) : "",
+      next: nextPath ? sektePathSlug(nextPath) : "",
+      next_link: nextPath ? sekteUrl(nextPath) : "",
+      back_to_detail: mangaId,
+      detail_link: seriesLink,
+      download_link: downloadLink,
+      images,
+    };
+  } catch (err) {
+    console.error("Sekte chapter error:", err.message);
+    return {
+      success: false,
+      source: "sektedoujin",
+      message: "Gagal scrape chapter",
+      error: err.message,
+    };
+  }
+}
+
+async function scrapeDoujindesuTerbaru({ page = 1 } = {}) {
+  try {
+    const url = page === 1 ? "/manhwa/" : `/manhwa/page/${page}/`;
+    const html = await doujindesuFetch(url);
+    const $ = cheerio.load(html);
+    const results = [];
+
+    $("section.feed#archives .entries article.entry").each((_, el) => {
+      const item = $(el);
+      const detailPath = item.find("a[href*='/manga/']").first().attr("href") || "";
+      const detailLink = doujindesuUrl(detailPath);
+      const title =
+        item.find(".metadata h3.title span").first().text().trim() ||
+        item.find("figure img").first().attr("title")?.trim() ||
+        item.find("a[href*='/manga/']").first().attr("title")?.trim() ||
+        "";
+
+      const image = doujindesuUrl(item.find("figure.thumbnail img").first().attr("src") || "");
+      const typeGenre = item.find("figure.thumbnail .type").first().text().trim() || "Manhwa";
+      const chapterEl = item.find(".metadata .artists a").first();
+      const chapterPath = chapterEl.attr("href") || "";
+      const chapterTitle =
+        chapterEl.find("span").first().text().trim() || chapterEl.text().trim();
+      const info = item.find(".metadata .artists .dtch").first().text().trim();
+      const genres = (item.attr("data-tags") || "")
+        .split("|")
+        .map((genre) => genre.trim())
+        .filter(Boolean);
+
+      if (!title || !detailPath) return;
+
+      results.push({
+        source: "doujindesu",
+        title,
+        slug: doujindesuSlug(detailPath),
+        image,
+        detail_link: detailLink,
+        description: "",
+        type_genre: typeGenre,
+        genres,
+        info,
+        update: chapterTitle,
+        chapter_terbaru: chapterTitle,
+        chapter_slug: doujindesuPathSlug(chapterPath),
+        chapter_link: doujindesuUrl(chapterPath),
+      });
+    });
+
+    const pages = [];
+    $("section.feed#archives nav.pagination a").each((_, el) => {
+      const pageNumber = parseInt($(el).text().trim(), 10);
+      if (!Number.isNaN(pageNumber)) pages.push(pageNumber);
+    });
+
+    return {
+      success: true,
+      source: "doujindesu.tv",
+      page,
+      totalPages: pages.length ? Math.max(...pages) : page,
+      total: results.length,
+      data: results,
+    };
+  } catch (err) {
+    console.error("Doujindesu terbaru error:", err.message);
+    return {
+      success: false,
+      source: "doujindesu.tv",
+      page,
+      total: 0,
+      data: [],
+      message: "Gagal scrape halaman",
+      error: err.message,
+    };
+  }
+}
+
+async function scrapeDoujindesuSearch(query, page = 1) {
+  try {
+    const searchPath =
+      page === 1
+        ? `/?s=${encodeURIComponent(query)}`
+        : `/page/${page}/?s=${encodeURIComponent(query)}`;
+    const html = await doujindesuFetch(searchPath);
+    const $ = cheerio.load(html);
+    const results = [];
+
+    $("section.feed#archives .entries article.entry").each((_, el) => {
+      const item = $(el);
+      const detailPath = item.find("a[href*='/manga/']").first().attr("href") || "";
+      const detailLink = doujindesuUrl(detailPath);
+      const title =
+        item.find(".metadata h3.title span").first().text().trim() ||
+        item.find("figure img").first().attr("title")?.trim() ||
+        item.find("a[href*='/manga/']").first().attr("title")?.trim() ||
+        "";
+      const image = doujindesuUrl(item.find("figure.thumbnail img").first().attr("src") || "");
+      const typeGenre = item.find("figure.thumbnail .type").first().text().trim();
+      const score = item.find(".metadata .score").first().text().replace(/\s+/g, " ").trim();
+      const status = item.find(".metadata .status").first().text().trim();
+      const genres = (item.attr("data-tags") || "")
+        .split("|")
+        .map((genre) => genre.trim())
+        .filter(Boolean);
+
+      if (!title || !detailPath) return;
+
+      results.push({
+        source: "doujindesu",
+        title,
+        image,
+        detail_link: detailLink,
+        update: status,
+        slug: doujindesuSlug(detailPath),
+        type_genre: typeGenre,
+        status,
+        score,
+        genres,
+      });
+    });
+
+    const pages = [];
+    $("section.feed#archives nav.pagination a").each((_, el) => {
+      const pageNumber = parseInt($(el).text().trim(), 10);
+      if (!Number.isNaN(pageNumber)) pages.push(pageNumber);
+    });
+
+    return {
+      success: true,
+      total: results.length,
+      query,
+      page,
+      totalPages: pages.length ? Math.max(...pages) : page,
+      data: results,
+    };
+  } catch (err) {
+    console.error("Doujindesu search error:", err.message);
+    return {
+      success: false,
+      total: 0,
+      query,
+      page,
+      data: [],
+      message: "Gagal mengambil data pencarian",
+      error: err.message,
+    };
+  }
+}
+
+async function scrapeDoujindesuDetail(slug) {
+  try {
+    const detailPath = slug.startsWith("http") ? slug : `/manga/${slug}/`;
+    const detailLink = doujindesuUrl(detailPath);
+    const html = await doujindesuFetch(detailPath);
+    const $ = cheerio.load(html);
+    const metadata = $("main#archive .wrapper > section.metadata").first();
+    const titleNode = metadata.find("h1.title").first().clone();
+    const alternativeTitle = titleNode.find(".alter").text().trim();
+
+    titleNode.find(".alter").remove();
+
+    const title = titleNode.text().replace(/\s+/g, " ").trim();
+    const image = doujindesuUrl(
+      $("main#archive .wrapper aside figure.thumbnail img").first().attr("src") || "",
+    );
+    const info = {};
+
+    metadata.find("table tr").each((_, el) => {
+      const key = $(el).find("td").first().text().replace(/\s+/g, " ").trim();
+      const valueCell = $(el).find("td").eq(1);
+      const values = valueCell
+        .find("a")
+        .map((__, a) => $(a).text().replace(/\s+/g, " ").trim())
+        .get()
+        .filter(Boolean);
+      const value = values.length
+        ? values.join(", ")
+        : valueCell.text().replace(/\s+/g, " ").trim();
+
+      if (key) info[key.toLowerCase().replace(/\s+/g, "_")] = value;
+    });
+
+    const genres = metadata
+      .find(".tags a")
+      .map((_, el) => $(el).text().replace(/\s+/g, " ").trim())
+      .get()
+      .filter(Boolean);
+
+    const synopsis = metadata
+      .find(".pb-2 p")
+      .first()
+      .text()
+      .replace(/^Sinopsis:\s*/i, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const chapters = [];
+    $("#chapter_list li").each((_, el) => {
+      const chapter = $(el);
+      const chapterPath = chapter.find(".epsleft .lchx a").first().attr("href") ||
+        chapter.find(".eps a").first().attr("href") ||
+        "";
+      const chapterTitle = chapter.find(".epsleft .lchx a").first().text().trim();
+      const chapterNumber = chapter.find(".eps chapter").first().text().trim();
+      const date = chapter.find(".epsleft .date").first().text().trim();
+      const downloadPath = chapter.find(".chright .linkdl a").first().attr("href") || "";
+
+      if (!chapterTitle && !chapterPath) return;
+
+      chapters.push({
+        title: chapterTitle,
+        chapter: chapterNumber,
+        slug: doujindesuPathSlug(chapterPath),
+        link: doujindesuUrl(chapterPath),
+        date,
+        is_new: chapter.find(".newchlabel").length > 0,
+        download_link: downloadPath,
+      });
+    });
+
+    const latestChapter = chapters[0] || null;
+    const firstChapter = chapters[chapters.length - 1] || null;
+    chapters.reverse();
+
+    return {
+      success: true,
+      data: {
+        source: "doujindesu",
+        title,
+        slug: doujindesuSlug(detailLink),
+        thumbnail: image,
+        image,
+        detail_link: detailLink,
+        alternative_title: alternativeTitle,
+        type: info.type || "",
+        type_genre: info.type || "",
+        status: info.status || "",
+        Pengarang: info.author || "",
+        Umur: info.rating || "",
+        Konsep: info.serialization || info.series || "",
+        series: info.series || "",
+        author: info.author || "",
+        serialization: info.serialization || "",
+        rating: info.rating || "",
+        created_date: info.created_date || "",
+        genres,
+        synopsis,
+        info: latestChapter?.date || info.created_date || "",
+        chapter_awal: firstChapter?.title || "",
+        chapter_terbaru: latestChapter?.title || "",
+        total_chapter: chapters.length,
+        total_chapters: chapters.length,
+        chapters,
+      },
+    };
+  } catch (err) {
+    console.error("Doujindesu detail error:", err.message);
+    return {
+      success: false,
+      source: "doujindesu",
+      message: "Gagal scrape detail",
+      error: err.message,
+    };
+  }
+}
+
+async function scrapeDoujindesuChapter(slug) {
+  try {
+    const chapterPath = slug.startsWith("http") ? slug : `/${slug.replace(/^\/+/, "")}/`;
+    const chapterLink = doujindesuUrl(chapterPath);
+    const html = await doujindesuFetch(chapterPath);
+    const $ = cheerio.load(html);
+    const reader = $("main#reader").first();
+    const header = reader.find("section.metadata header").first();
+    const title = header.find("h1").first().text().replace(/\s+/g, " ").trim();
+    const seriesEl = header.find(".epx a[href*='/manga/']").first();
+    const seriesTitle = seriesEl.text().replace(/\s+/g, " ").trim();
+    const seriesLink = doujindesuUrl(seriesEl.attr("href") || "");
+    const date = header
+      .find(".epx")
+      .first()
+      .clone()
+      .children()
+      .remove()
+      .end()
+      .text()
+      .replace(/\s*,?\s*in\s*$/i, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    const description = reader
+      .find(".desch")
+      .first()
+      .text()
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const navTop = reader.find("> header .naveps").first();
+    const prevPath = navTop.find("a[title='Previous Chapter']").first().attr("href") || "";
+    const allChapterPath = navTop.find("a[title='All Chapter']").first().attr("href") || "";
+    const nextAnchor = navTop.find(".nvs.rght a").first();
+    const nextPath = nextAnchor.hasClass("nonex") ? "" : nextAnchor.attr("href") || "";
+    const downloadLink = navTop.find(".linkdl a").first().attr("href") || "";
+    const mangaId = doujindesuSlug(seriesLink);
+    const chapterSlug = reader.attr("data-slug") || doujindesuPathSlug(chapterPath);
+
+    const imageSet = new Set();
+    const pushImage = (url) => {
+      const image = doujindesuNormalizeImageUrl(url);
+      if (image) imageSet.add(image);
+    };
+
+    reader.find("#anu img, #anu noscript img").each((_, el) => {
+      const img = $(el);
+      [
+        img.attr("data-src"),
+        img.attr("data-lazy-src"),
+        img.attr("data-original"),
+        img.attr("src"),
+      ].forEach(pushImage);
+
+      [img.attr("data-srcset"), img.attr("srcset")]
+        .filter(Boolean)
+        .flatMap((srcset) => srcset.split(","))
+        .map((entry) => entry.trim().split(/\s+/)[0])
+        .forEach(pushImage);
+    });
+
+    const imageUrlMatches = html.match(/https?:\\?\/\\?\/desu\.photos\/storage\/uploads\/[^"'<>\s]+(?:%20|\\? |[^"'<>\s])*?\.webp/gi) || [];
+    imageUrlMatches.forEach((image) => {
+      pushImage(image.replace(/\\\//g, "/"));
+    });
+
+    const images = [...imageSet];
+
+    if (!images.length) {
+      const probedImages = await probeDoujindesuChapterImages(seriesTitle, title);
+      images.push(...probedImages);
+    }
+
+    return {
+      success: true,
+      source: "doujindesu",
+      mangaId,
+      chapterSlug,
+      currentChapter: title,
+      title,
+      slug: chapterSlug,
+      chapter_id: reader.attr("data-id") || "",
+      total_pages: parseInt(reader.attr("data-total-pages"), 10) || images.length,
+      image_count: images.length,
+      totalImages: images.length,
+      chapter_link: chapterLink,
+      series: {
+        title: seriesTitle,
+        slug: mangaId,
+        link: seriesLink,
+      },
+      date,
+      description,
+      prev: prevPath ? doujindesuPathSlug(prevPath) : "",
+      prev_link: prevPath ? doujindesuUrl(prevPath) : "",
+      next: nextPath ? doujindesuPathSlug(nextPath) : "",
+      next_link: nextPath ? doujindesuUrl(nextPath) : "",
+      back_to_detail: mangaId,
+      detail_link: allChapterPath ? doujindesuUrl(allChapterPath) : seriesLink,
+      download_link: downloadLink,
+      images,
+    };
+  } catch (err) {
+    console.error("Doujindesu chapter error:", err.message);
+    return {
+      success: false,
+      source: "doujindesu",
+      message: "Gagal scrape chapter",
+      error: err.message,
+    };
+  }
+}
+
 
 async function scrapeMangakuDetail(url) {
   try {
@@ -1588,6 +2743,11 @@ app.get("/", (req, res) => {
       "/komiku/terbaru",
       "/komiku/detail/:slug",
       "/komiku/chapter/:slug",
+      "/doujindesu/terbaru",
+      "/doujindesu/manhwa/terbaru",
+      "/doujindesu/detail/:slug",
+      "/doujindesu/chapter/:slug",
+      "/doujindesu/search?q=",
     ],
   });
 });
@@ -2059,6 +3219,148 @@ app.get("/kiryuu/search", async (req, res) => {
       warning: "Kiryuu kemungkinan block request (403)",
     });
   }
+});
+
+app.get(
+  ["/doujindesu/terbaru", "/doujindesu/pustaka", "/doujindesu/manhwa/terbaru"],
+  async (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const result = await scrapeDoujindesuTerbaru({ page });
+
+  if (!result.success) {
+    return res.status(500).json(result);
+  }
+
+  res.json(result);
+  },
+);
+
+app.get(
+  ["/sekte/terbaru", "/sekte/pustaka", "/sektedoujin/terbaru", "/sektedoujin/pustaka"],
+  async (req, res) => {
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const result = await scrapeSekteTerbaru({ page });
+
+    if (!result.success) {
+      return res.status(500).json(result);
+    }
+
+    res.json(result);
+  },
+);
+
+app.get(["/sekte/detail/:slug", "/sektedoujin/detail/:slug"], async (req, res) => {
+  const { slug } = req.params;
+
+  if (!slug) {
+    return res.status(400).json({
+      success: false,
+      message: "Slug tidak diberikan!",
+    });
+  }
+
+  const result = await scrapeSekteDetail(slug);
+
+  if (!result.success) {
+    return res.status(500).json(result);
+  }
+
+  res.json(result);
+});
+
+app.get(["/sekte/search", "/sektedoujin/search"], async (req, res) => {
+  const { q, page = 1 } = req.query;
+
+  if (!q) {
+    return res.status(400).json({
+      success: false,
+      message: "Masukkan parameter ?q=",
+    });
+  }
+
+  const result = await scrapeSekteSearch(q, Math.max(1, parseInt(page, 10) || 1));
+
+  if (!result.success) {
+    return res.status(500).json(result);
+  }
+
+  res.json(result);
+});
+
+app.get([/^\/sekte\/chapter\/(.+)/, /^\/sektedoujin\/chapter\/(.+)/], async (req, res) => {
+  const slug = req.params[0];
+
+  if (!slug) {
+    return res.status(400).json({
+      success: false,
+      message: "Slug tidak diberikan!",
+    });
+  }
+
+  const result = await scrapeSekteChapter(slug);
+
+  if (!result.success) {
+    return res.status(500).json(result);
+  }
+
+  res.json(result);
+});
+
+app.get("/doujindesu/detail/:slug", async (req, res) => {
+  const { slug } = req.params;
+
+  if (!slug) {
+    return res.status(400).json({
+      success: false,
+      message: "Slug tidak diberikan!",
+    });
+  }
+
+  const result = await scrapeDoujindesuDetail(slug);
+
+  if (!result.success) {
+    return res.status(500).json(result);
+  }
+
+  res.json(result);
+});
+
+app.get("/doujindesu/search", async (req, res) => {
+  const { q, page = 1 } = req.query;
+
+  if (!q) {
+    return res.status(400).json({
+      success: false,
+      message: "Masukkan parameter ?q=",
+    });
+  }
+
+  const result = await scrapeDoujindesuSearch(q, Math.max(1, parseInt(page, 10) || 1));
+
+  if (!result.success) {
+    return res.status(500).json(result);
+  }
+
+  res.json(result);
+});
+
+app.get(/^\/doujindesu\/chapter\/(.+)/, async (req, res) => {
+  const slug = req.params[0];
+
+  if (!slug) {
+    return res.status(400).json({
+      success: false,
+      message: "Slug tidak diberikan!",
+    });
+  }
+
+  const result = await scrapeDoujindesuChapter(slug);
+
+  if (!result.success) {
+    return res.status(500).json(result);
+  }
+
+  res.json(result);
 });
 
 
