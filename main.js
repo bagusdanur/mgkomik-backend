@@ -174,7 +174,7 @@ function nekoTerbaruUrl(page = 1) {
 function nekoSearchUrl(query, page = 1) {
   const encoded = encodeURIComponent(query);
   if (page <= 1) return `${NEKO_BASE_URL}/search/${encoded}`;
-  return `${NEKO_BASE_URL}/search/${encoded}/page/${page}`;
+  return `${NEKO_BASE_URL}/search/${encoded}/page/${page}/`;
 }
 
 function nekoSlug(href = "") {
