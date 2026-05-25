@@ -628,6 +628,11 @@ async function scrapeKomikuChapter(url) {
     });
 
     const $ = cheerio.load(data);
+    const normalizeKomikuSlug = (value = "") =>
+      value
+        .replace(/\\\//g, "/")
+        .replace(/^https?:\/\/(?:www\.)?komiku\.org\/?/i, "")
+        .replace(/^\/+|\/+$/g, "");
 
     // Ambil images
     const images = [];
@@ -642,14 +647,35 @@ async function scrapeKomikuChapter(url) {
       .replace("https://komiku.org/", "")
       .replace(/\//g, "");
 
-    // Ambil mangaId
-    const mangaId = chapterSlug.split("-chapter")[0];
+    // Ambil mangaId dari halaman chapter. Beberapa komik punya slug detail
+    // yang beda dari prefix chapter, contoh: solo-leveling -> solo-leveling-id.
+    const chapterDataMatch = data.match(/link_series\s*:\s*["']([^"']+)["']/);
+    const detailLink =
+      chapterDataMatch?.[1] ||
+      $("a[rel='tag'][href*='/manga/']").first().attr("href") ||
+      $("a[href*='/manga/']").first().attr("href") ||
+      "";
+    const mangaId =
+      normalizeKomikuSlug(detailLink).replace(/^manga\//, "") ||
+      chapterSlug.split("-chapter")[0];
 
     // Ambil daftar chapter
     const detail = await scrapeKomikuDetail(
       `https://komiku.org/manga/${mangaId}/`,
     );
-    const chapters = detail.data.chapters;
+    const chapters = detail.success ? detail.data?.chapters || [] : [];
+
+    const pagePrev = normalizeKomikuSlug(
+      $(".toolbar a[aria-label='Prev']").first().attr("href") ||
+        $(".nxpr a").first().attr("href") ||
+        "",
+    );
+    const pageNext = normalizeKomikuSlug(
+      $(".toolbar a[aria-label='Next']").first().attr("href") ||
+        $(".pagination a.next").first().attr("href") ||
+        $(".nextch").attr("data") ||
+        "",
+    );
 
     // Cari index chapter saat ini
     const index = chapters.findIndex((c) => c.slug === chapterSlug);
@@ -659,8 +685,11 @@ async function scrapeKomikuChapter(url) {
       mangaId,
       chapterSlug,
       currentChapter: chapters[index]?.title || "",
-      prev: index > 0 ? chapters[index - 1].slug : null,
-      next: index < chapters.length - 1 ? chapters[index + 1].slug : null,
+      prev: index > 0 ? chapters[index - 1].slug : pagePrev || null,
+      next:
+        index >= 0 && index < chapters.length - 1
+          ? chapters[index + 1].slug
+          : pageNext || null,
       back_to_detail: mangaId,
       images,
     };
