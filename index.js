@@ -2965,7 +2965,7 @@ app.get("/genre/:genre", async (req, res) => {
 // =======================================================
 // 📚 ROUTE: PUSTAKA KOMIKU (API)
 // =======================================================
-app.get("/pustaka", async (req, res) => {
+app.get("/komiku/pustaka", async (req, res) => {
   const page = parseInt(req.query.page) || 1;
 
   const data = await scrapeKomikuPustaka(page);
