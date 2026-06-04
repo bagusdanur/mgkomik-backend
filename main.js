@@ -1,10 +1,11 @@
 const axios = require("axios");
+const https = require("https");
 const cloudscraper = require("cloudscraper");
 const cheerio = require("cheerio");
 const express = require("express");
 const app = express();
 const cors = require("cors");
-const PORT = process.env.PORT || 3012;
+const PORT = process.env.PORT || 3014;
 
 app.use(cors({ origin: "*" }));
 
@@ -63,6 +64,7 @@ async function fetchRetry(url, options = {}, retries = 2) {
 // ─────────────────────────────────────────────────────────────────────────────
 const NEKO_BASE_URL = "https://nekopoi.care";
 const NEKO_WORKER_URL = process.env.NEKO_WORKER_URL || "https://neko.ezcantik9.workers.dev/";
+const nekoHttpsAgent = new https.Agent({ rejectUnauthorized: false });
 
 function nekoHeaders(referer = NEKO_BASE_URL + "/") {
   return {
@@ -77,46 +79,89 @@ function nekoHeaders(referer = NEKO_BASE_URL + "/") {
 }
 
 async function fetchHtml(url) {
+  const htmls = await fetchHtmlVariants(url);
+  return htmls[0].html;
+}
+
+function normalizeHtmlPayload(payload) {
+  if (Buffer.isBuffer(payload)) return payload.toString("utf8");
+  if (typeof payload === "string") return payload;
+  if (payload && typeof payload === "object") {
+    return payload.html || payload.body || payload.content || payload.data || null;
+  }
+  return null;
+}
+
+async function fetchHtmlVariants(url) {
   const attempts = [];
 
   if (NEKO_WORKER_URL) {
-    attempts.push(async () => {
+    attempts.push({
+      label: "worker-raw",
+      run: async () => {
+      const separator = NEKO_WORKER_URL.includes("?") ? "" : "?url=";
+      const proxyUrl = `${NEKO_WORKER_URL}${separator}${url}`;
+      const { data } = await axios.get(proxyUrl, {
+        timeout: 20000,
+      });
+      return data;
+      },
+    });
+
+    attempts.push({
+      label: "worker-encoded",
+      run: async () => {
       const separator = NEKO_WORKER_URL.includes("?") ? "" : "?url=";
       const proxyUrl = `${NEKO_WORKER_URL}${separator}${encodeURIComponent(url)}`;
       const { data } = await axios.get(proxyUrl, {
         timeout: 20000,
-        headers: nekoHeaders(NEKO_BASE_URL + "/"),
       });
       return data;
+      },
+    });
+  } else {
+    attempts.push({
+      label: "direct",
+      run: async () => {
+      const { data } = await axios.get(url, {
+        timeout: 20000,
+        headers: nekoHeaders(NEKO_BASE_URL + "/"),
+        httpsAgent: nekoHttpsAgent,
+        maxRedirects: 5,
+      });
+      return data;
+      },
+    });
+
+    attempts.push({
+      label: "cloudscraper",
+      run: async () => {
+      return await cloudscraper.get(url, {
+        timeout: 20000,
+        headers: nekoHeaders(NEKO_BASE_URL + "/"),
+        agent: nekoHttpsAgent,
+      });
+      },
     });
   }
 
-  attempts.push(async () => {
-    const { data } = await axios.get(url, {
-      timeout: 20000,
-      headers: nekoHeaders(NEKO_BASE_URL + "/"),
-      maxRedirects: 5,
-    });
-    return data;
-  });
-
-  attempts.push(async () => {
-    return await cloudscraper.get(url, {
-      timeout: 20000,
-      headers: nekoHeaders(NEKO_BASE_URL + "/"),
-    });
-  });
-
   const errors = [];
+  const htmls = [];
   for (const attempt of attempts) {
     try {
-      const html = await attempt();
-      if (typeof html === "string" && html.trim()) return html;
+      const payload = await attempt.run();
+      const html = normalizeHtmlPayload(payload);
+      if (typeof html === "string" && html.trim()) {
+        htmls.push({ label: attempt.label, html });
+      } else {
+        errors.push(`${attempt.label}:non-html:${typeof payload}`);
+      }
     } catch (err) {
-      errors.push(err.response?.status || err.statusCode || err.code || err.message);
+      errors.push(`${attempt.label}:${err.response?.status || err.statusCode || err.code || err.message}`);
     }
   }
 
+  if (htmls.length > 0) return htmls;
   throw new Error(`Semua fetch Nekopoi gagal: ${errors.filter(Boolean).join(" -> ")}`);
 }
 
@@ -174,7 +219,7 @@ function nekoTerbaruUrl(page = 1) {
 function nekoSearchUrl(query, page = 1) {
   const encoded = encodeURIComponent(query);
   if (page <= 1) return `${NEKO_BASE_URL}/search/${encoded}`;
-  return `${NEKO_BASE_URL}/search/${encoded}/page/${page}/`;
+  return `${NEKO_BASE_URL}/search/${encoded}/page/${page}`;
 }
 
 function nekoSlug(href = "") {
@@ -591,33 +636,139 @@ async function scrapeNekopoiTerbaru(url) {
   }
 }
 
-async function scrapeNekopoiSearch(query, page = 1) {
+async function scrapeNekopoiSearch(query, page = 1, debugMode = false) {
   try {
-    const url = nekoSearchUrl(query, page);
-    const html = await fetchHtml(url);
-    const $ = cheerio.load(html);
-    const items = [];
-    $(".nk-search-results ul li").each((_, el) => {
-      const a = $(el).find("a.nk-search-item");
-      const href = a.attr("href") || "";
-      const slug = nekoSlug(href);
-      const thumbStyle = a.find(".nk-search-thumb").attr("style") || "";
-      const thumbMatch = thumbStyle.match(/url\(['"]?(.*?)['"]?\)/);
-      const thumbnail = thumbMatch ? thumbMatch[1] : "";
-      const title = a.find("h2").text().trim();
-      const desc = a.find(".nk-search-desc").text().trim();
-      const tagMatch = title.match(/^\[([^\]]+)\]/);
-      const tag = tagMatch ? tagMatch[1] : "";
-      const epMatch = title.match(/episode\s+(\d+)/i);
-      const latestEpisode = epMatch ? parseInt(epMatch[1]) : null;
-      items.push({ title, tag, thumbnail, slug, latestEpisode, desc, url: href });
-    });
-    const currentPage = parseInt($(".page-numbers.current").text().trim()) || page;
-    const lastPageEl = $(".nav-links .page-numbers:not(.next):not(.prev):not(.dots)").last();
-    const totalPages = parseInt(lastPageEl.text().trim()) || 1;
-    const hasNext = $("a.next.page-numbers").length > 0;
-    const hasPrev = $("a.prev.page-numbers").length > 0;
-    return {
+    const urls = [nekoSearchUrl(query, page)];
+    let $;
+    let items = [];
+    const errors = [];
+    const debug = {
+      requestedPage: page,
+      discoveredUrl: null,
+      urls: [],
+      candidates: [],
+      errors,
+    };
+
+    const parseItems = ($doc) => {
+      const results = [];
+      $doc("#nk-content .nk-search-results a.nk-search-item, .nk-main-content .nk-search-results a.nk-search-item, a.nk-search-item").each((_, el) => {
+        const a = $doc(el);
+        const href = a.attr("href") || "";
+        const slug = nekoSlug(href);
+        const thumbStyle = a.find(".nk-search-thumb").attr("style") || "";
+        const thumbMatch = thumbStyle.match(/url\(['"]?(.*?)['"]?\)/);
+        const thumbnail = thumbMatch ? thumbMatch[1] : a.find("img").first().attr("src") || "";
+        const title = a.find("h2, .entry-title, .title").first().text().trim();
+        const desc = a.find(".nk-search-desc, p").first().text().trim();
+        const tagMatch = title.match(/^\[([^\]]+)\]/);
+        const tag = tagMatch ? tagMatch[1] : "";
+        const epMatch = title.match(/episode\s+(\d+)/i);
+        const latestEpisode = epMatch ? parseInt(epMatch[1]) : null;
+
+        if (href || title) {
+          results.push({ title, tag, thumbnail, slug, latestEpisode, desc, url: href });
+        }
+      });
+      return results;
+    };
+
+    const parseCurrentPage = ($doc) => (
+      parseInt($doc("nav.navigation.pagination .page-numbers.current").first().text().trim()) ||
+      parseInt($doc(".nav-links .page-numbers.current").first().text().trim()) ||
+      parseInt($doc(".page-numbers.current").first().text().trim()) ||
+      page
+    );
+
+    if (page > 1) {
+      try {
+        const firstPageHtmls = await fetchHtmlVariants(nekoSearchUrl(query, 1));
+        for (const { html } of firstPageHtmls) {
+          const firstPage$ = cheerio.load(html);
+          const discoveredUrl = firstPage$("nav.navigation.pagination .page-numbers, .nav-links .page-numbers")
+            .filter((_, el) => firstPage$(el).text().trim() === String(page))
+            .first()
+            .attr("href");
+
+          if (discoveredUrl) {
+            debug.discoveredUrl = discoveredUrl;
+            urls.unshift(discoveredUrl);
+            break;
+          }
+        }
+      } catch (err) {
+        errors.push(err.message);
+      }
+
+    }
+
+    const uniqueUrls = [...new Set(urls)];
+    debug.urls = uniqueUrls;
+
+    for (const url of uniqueUrls) {
+      try {
+        const htmls = await fetchHtmlVariants(url);
+
+        for (const { label, html } of htmls) {
+          const candidate$ = cheerio.load(html);
+          const candidateItems = parseItems(candidate$);
+          const candidatePage = parseCurrentPage(candidate$);
+          const pageTitle = candidate$("title").first().text().trim() || null;
+          const isBlockedPage = /internet baik/i.test(pageTitle || "");
+          const pager = candidate$("nav.navigation.pagination .nav-links").first().length
+            ? candidate$("nav.navigation.pagination .nav-links").first()
+            : candidate$(".nav-links").first();
+
+          debug.candidates.push({
+            url,
+            fetcher: label,
+            htmlLength: html.length,
+            itemCount: candidateItems.length,
+            currentPage: candidatePage,
+            totalPages: parseInt(pager.find(".page-numbers:not(.next):not(.prev):not(.dots)").last().text().trim()) || null,
+            hasSearchResultsWrap: candidate$(".nk-search-results").length > 0,
+            hasMainContent: candidate$(".nk-main-content").length > 0,
+            firstTitle: candidateItems[0]?.title || null,
+            firstHref: candidateItems[0]?.url || null,
+            pageTitle,
+            isBlockedPage,
+          });
+
+          if (isBlockedPage) {
+            errors.push(`${label}:blocked:${pageTitle}`);
+            continue;
+          }
+
+          if (!$) {
+            $ = candidate$;
+          }
+
+          if (candidateItems.length > 0 && (items.length === 0 || candidatePage === page)) {
+            $ = candidate$;
+            items = candidateItems;
+          }
+
+          if (items.length > 0 && candidatePage === page) break;
+        }
+
+        if (items.length > 0 && parseCurrentPage($) === page) break;
+      } catch (err) {
+        errors.push(err.message);
+      }
+    }
+
+    if (!$ && errors.length) throw new Error(errors.join(" | "));
+    if (!$) throw new Error("Tidak ada HTML Nekopoi valid yang bisa diparse");
+
+    const currentPage = parseCurrentPage($);
+    const pager = $("nav.navigation.pagination .nav-links").first().length
+      ? $("nav.navigation.pagination .nav-links").first()
+      : $(".nav-links").first();
+    const lastPageEl = pager.find(".page-numbers:not(.next):not(.prev):not(.dots)").last();
+    const totalPages = Math.max(parseInt(lastPageEl.text().trim()) || currentPage || 1, currentPage || 1);
+    const hasNext = pager.find("a.next.page-numbers").length > 0;
+    const hasPrev = pager.find("a.prev.page-numbers").length > 0 || page > 1;
+    const result = {
       success: true, query,
       pagination: { currentPage, totalPages, hasNext, hasPrev,
         nextPage: hasNext ? currentPage + 1 : null,
@@ -625,6 +776,8 @@ async function scrapeNekopoiSearch(query, page = 1) {
       },
       total: items.length, data: items,
     };
+    if (debugMode) result.debug = debug;
+    return result;
   } catch (err) {
     return { success: false, message: "Gagal scrape search: " + err.message };
   }
@@ -1233,15 +1386,16 @@ app.get("/nekopoi/terbaru", async (req, res) => {
 });
 
 app.get("/nekopoi/search", async (req, res) => {
-  const { q, page } = req.query;
+  const { q, page, debug } = req.query;
   if (!q || q.trim().length < 2)
     return res.status(400).json({ success: false, message: "Parameter 'q' minimal 2 karakter" });
   const pageNum = parseInt(page) || 1;
-  const cacheKey = `neko_search_${q.toLowerCase().replace(/\s+/g, "_")}_p${pageNum}`;
-  const cached = getCache(cacheKey);
+  const debugMode = debug === "1" || debug === "true";
+  const cacheKey = `neko_search_v2_${q.toLowerCase().replace(/\s+/g, "_")}_p${pageNum}`;
+  const cached = debugMode ? null : getCache(cacheKey);
   if (cached) return res.json(cached);
-  const result = await scrapeNekopoiSearch(q, pageNum);
-  if (result.success) setCache(cacheKey, result, 300);
+  const result = await scrapeNekopoiSearch(q, pageNum, debugMode);
+  if (!debugMode && result.success && result.total > 0) setCache(cacheKey, result, 300);
   res.json(result);
 });
 
