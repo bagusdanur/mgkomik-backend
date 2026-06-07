@@ -103,6 +103,12 @@ async function fetchHtmlVariants(url) {
       const proxyUrl = `${NEKO_WORKER_URL}${separator}${url}`;
       const { data } = await axios.get(proxyUrl, {
         timeout: 20000,
+        headers: {
+          "User-Agent": randomUA(),
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+          "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
+          Referer: NEKO_BASE_URL + "/",
+        },
       });
       return data;
       },
@@ -115,6 +121,12 @@ async function fetchHtmlVariants(url) {
       const proxyUrl = `${NEKO_WORKER_URL}${separator}${encodeURIComponent(url)}`;
       const { data } = await axios.get(proxyUrl, {
         timeout: 20000,
+        headers: {
+          "User-Agent": randomUA(),
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+          "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
+          Referer: NEKO_BASE_URL + "/",
+        },
       });
       return data;
       },

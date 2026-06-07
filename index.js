@@ -13,6 +13,36 @@ app.use(
   }),
 );
 
+function getPublicBaseUrl(req) {
+  const forwardedProto = req.headers["x-forwarded-proto"];
+  const proto = Array.isArray(forwardedProto)
+    ? forwardedProto[0]
+    : forwardedProto || req.protocol || "https";
+
+  return `${proto}://${req.get("host")}`;
+}
+
+function isAllowedKomikuImageUrl(imageUrl) {
+  try {
+    const parsed = new URL(imageUrl);
+    return (
+      ["http:", "https:"].includes(parsed.protocol) &&
+      (
+        parsed.hostname === "cdn.komiku.org" ||
+        parsed.hostname === "komiku.org" ||
+        parsed.hostname.endsWith(".komiku.org")
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+function toKomikuImageProxyUrl(req, imageUrl) {
+  if (!imageUrl) return "";
+  return `${getPublicBaseUrl(req)}/komiku/image?url=${encodeURIComponent(imageUrl)}`;
+}
+
 
 function convertTimeToID(text) {
   return text
@@ -2836,6 +2866,43 @@ app.get("/komiku/detail/:slug", async (req, res) => {
   res.json(result);
 });
 
+app.get("/komiku/image", async (req, res) => {
+  try {
+    const imageUrl = req.query.url;
+
+    if (!imageUrl || Array.isArray(imageUrl)) {
+      return res.status(400).send("Missing url");
+    }
+
+    if (!isAllowedKomikuImageUrl(imageUrl)) {
+      return res.status(403).send("Image host not allowed");
+    }
+
+    const response = await axios.get(imageUrl, {
+      responseType: "arraybuffer",
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        Referer: "https://komiku.org/",
+      },
+      timeout: 15000,
+      validateStatus: () => true,
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      return res.status(response.status).send("Image fetch failed");
+    }
+
+    res.setHeader("Content-Type", response.headers["content-type"] || "image/jpeg");
+    res.setHeader("Cache-Control", "public, max-age=604800, s-maxage=604800");
+
+    return res.send(Buffer.from(response.data));
+  } catch (err) {
+    return res.status(500).send(err.message || "Image proxy error");
+  }
+});
+
 // === Route: Chapter ===
 app.get("/komiku/chapter/:slug", async (req, res) => {
   const { slug } = req.params;
@@ -2846,7 +2913,14 @@ app.get("/komiku/chapter/:slug", async (req, res) => {
 
   const fullUrl = `https://komiku.org/${slug}/`;
   const result = await scrapeKomikuChapter(fullUrl);
-  res.json(result);
+
+if (result?.success && Array.isArray(result.images)) {
+  result.images = result.images
+    .filter(Boolean)
+    .map((imageUrl) => toKomikuImageProxyUrl(req, imageUrl));
+}
+
+res.json(result);
 });
 
 app.get("/komiku/search", async (req, res) => {
