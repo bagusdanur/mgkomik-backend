@@ -13,13 +13,11 @@ app.use(
   }),
 );
 
-function getPublicBaseUrl(req) {
-  const forwardedProto = req.headers["x-forwarded-proto"];
-  const proto = Array.isArray(forwardedProto)
-    ? forwardedProto[0]
-    : forwardedProto || req.protocol || "https";
+const KOMIKU_IMAGE_WORKER = "https://cdnkm.konatanime17.workers.dev/";
 
-  return `${proto}://${req.get("host")}`;
+function toKomikuWorkerImageUrl(imageUrl) {
+  if (!imageUrl) return "";
+  return `${KOMIKU_IMAGE_WORKER}?url=${encodeURIComponent(imageUrl)}`;
 }
 
 function isAllowedKomikuImageUrl(imageUrl) {
@@ -2912,15 +2910,24 @@ app.get("/komiku/chapter/:slug", async (req, res) => {
       .json({ success: false, message: "Slug tidak diberikan!" });
 
   const fullUrl = `https://komiku.org/${slug}/`;
+  app.get("/komiku/chapter/:slug", async (req, res) => {
+  const { slug } = req.params;
+  if (!slug)
+    return res
+      .status(400)
+      .json({ success: false, message: "Slug tidak diberikan!" });
+
+  const fullUrl = `https://komiku.org/${slug}/`;
   const result = await scrapeKomikuChapter(fullUrl);
 
-if (result?.success && Array.isArray(result.images)) {
-  result.images = result.images
-    .filter(Boolean)
-    .map((imageUrl) => toKomikuImageProxyUrl(req, imageUrl));
-}
+  if (result?.success && Array.isArray(result.images)) {
+    result.images = result.images
+      .filter(Boolean)
+      .map((imageUrl) => toKomikuWorkerImageUrl(imageUrl));
+  }
 
-res.json(result);
+  res.json(result);
+});
 });
 
 app.get("/komiku/search", async (req, res) => {
