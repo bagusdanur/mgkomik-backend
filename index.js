@@ -20,26 +20,7 @@ function toKomikuWorkerImageUrl(imageUrl) {
   return `${KOMIKU_IMAGE_WORKER}?url=${encodeURIComponent(imageUrl)}`;
 }
 
-function isAllowedKomikuImageUrl(imageUrl) {
-  try {
-    const parsed = new URL(imageUrl);
-    return (
-      ["http:", "https:"].includes(parsed.protocol) &&
-      (
-        parsed.hostname === "cdn.komiku.org" ||
-        parsed.hostname === "komiku.org" ||
-        parsed.hostname.endsWith(".komiku.org")
-      )
-    );
-  } catch {
-    return false;
-  }
-}
 
-function toKomikuImageProxyUrl(req, imageUrl) {
-  if (!imageUrl) return "";
-  return `${getPublicBaseUrl(req)}/komiku/image?url=${encodeURIComponent(imageUrl)}`;
-}
 
 
 function convertTimeToID(text) {
@@ -57,8 +38,8 @@ async function scrapeKiryuuPustaka({ page = 1 } = {}) {
   try {
     const url =
       page === 1
-        ? "https://v4.kiryuu.to/latest/"
-        : `https://v4.kiryuu.to/latest/?the_page=${page}`;
+        ? "https://v6.kiryuu.to/latest/"
+        : `https://v6.kiryuu.to/latest/?the_page=${page}`;
 
     console.log("🔥 URL:", url);
 
@@ -69,7 +50,7 @@ async function scrapeKiryuuPustaka({ page = 1 } = {}) {
         Accept:
           "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
-        Referer: "https://v4.kiryuu.to/",
+        Referer: "https://v6.kiryuu.to/",
         Connection: "keep-alive",
       },
       timeout: 15000,
@@ -189,7 +170,7 @@ async function scrapeKiryuuDetail(url) {
         Accept:
           "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
-        Referer: "https://v4.kiryuu.to/",
+        Referer: "https://v6.kiryuu.to/",
         Connection: "keep-alive",
       },
       timeout: 15000,
@@ -238,7 +219,7 @@ async function scrapeKiryuuDetail(url) {
       const manga_id = matchId ? matchId[1] : null;
 
       if (manga_id) {
-        const ajaxUrl = `https://v4.kiryuu.to/wp-admin/admin-ajax.php?manga_id=${manga_id}&page=1&action=chapter_list`;
+        const ajaxUrl = `https://v6.kiryuu.to/wp-admin/admin-ajax.php?manga_id=${manga_id}&page=1&action=chapter_list`;
 
         const { data: chapterHTML } = await axios.get(ajaxUrl, {
           headers: {
@@ -247,7 +228,7 @@ async function scrapeKiryuuDetail(url) {
             Accept:
               "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
-            Referer: "https://v4.kiryuu.to/",
+            Referer: "https://v6.kiryuu.to/",
             Connection: "keep-alive",
           },
         });
@@ -318,7 +299,7 @@ async function scrapeKiryuuChapter(url) {
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/123 Safari/537.36",
-        Referer: "https://v4.kiryuu.to/",
+        Referer: "https://v6.kiryuu.to/",
       },
       timeout: 15000,
     });
@@ -375,7 +356,7 @@ async function scrapeKiryuuChapter(url) {
 
     // ================= SLUG =================
     const chapterSlug = url
-      .replace("https://v4.kiryuu.to/manga/", "")
+      .replace("https://v6.kiryuu.to/manga/", "")
       .replace(/\/$/, "");
 
     return {
@@ -385,7 +366,7 @@ async function scrapeKiryuuChapter(url) {
       currentChapter: title,
       prev,
       next,
-      back_to_detail: `https://v4.kiryuu.to/manga/${mangaId}/`,
+      back_to_detail: `https://v6.kiryuu.to/manga/${mangaId}/`,
       totalImages: images.length,
       images,
     };
@@ -2864,53 +2845,10 @@ app.get("/komiku/detail/:slug", async (req, res) => {
   res.json(result);
 });
 
-app.get("/komiku/image", async (req, res) => {
-  try {
-    const imageUrl = req.query.url;
 
-    if (!imageUrl || Array.isArray(imageUrl)) {
-      return res.status(400).send("Missing url");
-    }
-
-    if (!isAllowedKomikuImageUrl(imageUrl)) {
-      return res.status(403).send("Image host not allowed");
-    }
-
-    const response = await axios.get(imageUrl, {
-      responseType: "arraybuffer",
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-        Referer: "https://komiku.org/",
-      },
-      timeout: 15000,
-      validateStatus: () => true,
-    });
-
-    if (response.status < 200 || response.status >= 300) {
-      return res.status(response.status).send("Image fetch failed");
-    }
-
-    res.setHeader("Content-Type", response.headers["content-type"] || "image/jpeg");
-    res.setHeader("Cache-Control", "public, max-age=604800, s-maxage=604800");
-
-    return res.send(Buffer.from(response.data));
-  } catch (err) {
-    return res.status(500).send(err.message || "Image proxy error");
-  }
-});
 
 // === Route: Chapter ===
 app.get("/komiku/chapter/:slug", async (req, res) => {
-  const { slug } = req.params;
-  if (!slug)
-    return res
-      .status(400)
-      .json({ success: false, message: "Slug tidak diberikan!" });
-
-  const fullUrl = `https://komiku.org/${slug}/`;
-  app.get("/komiku/chapter/:slug", async (req, res) => {
   const { slug } = req.params;
   if (!slug)
     return res
@@ -2927,7 +2865,6 @@ app.get("/komiku/chapter/:slug", async (req, res) => {
   }
 
   res.json(result);
-});
 });
 
 app.get("/komiku/search", async (req, res) => {
@@ -3141,7 +3078,7 @@ app.get("/kiryuu/pustaka", async (req, res) => {
 
   res.json({
     success: true,
-    source: "v4.kiryuu.to",
+    source: "v6.kiryuu.to",
     page,
     total: result.data.length,
     data: result.data,
@@ -3159,7 +3096,7 @@ app.get("/kiryuu/detail/:slug", async (req, res) => {
       });
     }
 
-    const fullUrl = `https://v4.kiryuu.to/manga/${slug}/`;
+    const fullUrl = `https://v6.kiryuu.to/manga/${slug}/`;
 
     const result = await scrapeKiryuuDetail(fullUrl);
 
@@ -3178,7 +3115,7 @@ app.get(/^\/kiryuu\/chapter\/(.+)/, async (req, res) => {
   try {
     const slug = req.params[0];
 
-    const fullUrl = `https://v4.kiryuu.to/manga/${slug}/`;
+    const fullUrl = `https://v6.kiryuu.to/manga/${slug}/`;
 
     const result = await scrapeKiryuuChapter(fullUrl);
 
@@ -3222,7 +3159,7 @@ app.get("/kiryuu/search", async (req, res) => {
     // 2. AMBIL NONCE + COOKIE
     // =============================
     const nonceRes = await client.get(
-      "https://v5.kiryuu.to/wp-admin/admin-ajax.php?type=search_form&action=get_nonce",
+      "https://v6.kiryuu.to/wp-admin/admin-ajax.php?type=search_form&action=get_nonce",
     );
 
     const cookies = nonceRes.headers["set-cookie"] || [];
@@ -3259,14 +3196,14 @@ app.get("/kiryuu/search", async (req, res) => {
     // 4. REQUEST SEARCH
     // =============================
     const { data } = await client.post(
-      "https://v5.kiryuu.to/wp-admin/admin-ajax.php",
+      "https://v6.kiryuu.to/wp-admin/admin-ajax.php",
       params,
       {
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
           "X-Requested-With": "XMLHttpRequest",
-          Referer: "https://v5.kiryuu.to/advanced-search/",
-          Origin: "https://v5.kiryuu.to",
+          Referer: "https://v6.kiryuu.to/advanced-search/",
+          Origin: "https://v6.kiryuu.to",
           Cookie: cookies.join("; "), // 🔥 penting
         },
       },
