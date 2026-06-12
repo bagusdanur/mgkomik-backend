@@ -55,6 +55,65 @@ function toKiryuuProxyUrl(url) {
   return kiryuuProxyUrl(targetUrl) || targetUrl;
 }
 
+function getRequestBaseUrl(req) {
+  const forwardedProto = req.headers["x-forwarded-proto"];
+  const proto = Array.isArray(forwardedProto)
+    ? forwardedProto[0]
+    : String(forwardedProto || req.protocol || "http").split(",")[0].trim();
+  return `${proto}://${req.get("host")}`;
+}
+
+function getOriginalKiryuuImageUrl(url = "") {
+  const value = String(url).trim();
+  if (!value) return "";
+
+  try {
+    const parsed = new URL(value);
+    const proxiedUrl = parsed.searchParams.get("url");
+    if (proxiedUrl && parsed.hostname.includes("workers.dev")) {
+      return proxiedUrl;
+    }
+  } catch {
+    return kiryuuUrl(value);
+  }
+
+  return kiryuuUrl(value);
+}
+
+function toKiryuuBackendImageUrl(url, req) {
+  const originalUrl = getOriginalKiryuuImageUrl(url);
+  if (!originalUrl) return "";
+  return `${getRequestBaseUrl(req)}/kiryuu/image?url=${encodeURIComponent(originalUrl)}`;
+}
+
+function rewriteKiryuuImages(payload, req) {
+  if (Array.isArray(payload)) {
+    return payload.map((item) => rewriteKiryuuImages(item, req));
+  }
+
+  if (!payload || typeof payload !== "object") return payload;
+
+  for (const [key, value] of Object.entries(payload)) {
+    if ((key === "image" || key === "thumbnail") && typeof value === "string") {
+      payload[key] = toKiryuuBackendImageUrl(value, req);
+      continue;
+    }
+
+    if (key === "images" && Array.isArray(value)) {
+      payload[key] = value.map((imageUrl) =>
+        typeof imageUrl === "string" ? toKiryuuBackendImageUrl(imageUrl, req) : imageUrl,
+      );
+      continue;
+    }
+
+    if (value && typeof value === "object") {
+      payload[key] = rewriteKiryuuImages(value, req);
+    }
+  }
+
+  return payload;
+}
+
 function isCloudflareChallenge(html = "") {
   return /Just a moment|cf_chl|challenge-platform|Enable JavaScript and cookies/i.test(
     String(html),
@@ -3150,8 +3209,34 @@ app.get("/kiryuu/pustaka", async (req, res) => {
     source: "v6.kiryuu.to",
     page,
     total: result.data.length,
-    data: result.data,
+    data: rewriteKiryuuImages(result.data, req),
   });
+});
+
+app.get("/kiryuu/image", async (req, res) => {
+  try {
+    const imageUrl = getOriginalKiryuuImageUrl(req.query.url || "");
+
+    if (!imageUrl || !imageUrl.startsWith(`${KIRYUU_BASE_URL}/`)) {
+      return res.status(400).send("URL gambar Kiryuu tidak valid");
+    }
+
+    const response = await axios.get(kiryuuProxyUrl(imageUrl) || imageUrl, {
+      responseType: "stream",
+      timeout: 30000,
+      headers: {
+        ...kiryuuHeaders(`${KIRYUU_BASE_URL}/`),
+        Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+      },
+    });
+
+    res.set("Content-Type", response.headers["content-type"] || "image/jpeg");
+    res.set("Cache-Control", "public, max-age=86400, s-maxage=86400");
+    response.data.pipe(res);
+  } catch (err) {
+    console.error("Kiryuu image proxy error:", err.message);
+    res.status(502).send("Gagal mengambil gambar Kiryuu");
+  }
 });
 
 app.get("/kiryuu/detail/:slug", async (req, res) => {
@@ -3169,7 +3254,7 @@ app.get("/kiryuu/detail/:slug", async (req, res) => {
 
     const result = await scrapeKiryuuDetail(fullUrl);
 
-    res.json(result);
+    res.json(rewriteKiryuuImages(result, req));
   } catch (err) {
     console.error("Route error:", err.message);
 
@@ -3188,7 +3273,7 @@ app.get(/^\/kiryuu\/chapter\/(.+)/, async (req, res) => {
 
     const result = await scrapeKiryuuChapter(fullUrl);
 
-    res.json(result);
+    res.json(rewriteKiryuuImages(result, req));
   } catch (err) {
     res.json({
       success: false,
@@ -3321,7 +3406,7 @@ app.get("/kiryuu/search", async (req, res) => {
       success: true,
       total: results.length,
       query: q,
-      data: results,
+      data: rewriteKiryuuImages(results, req),
     });
   } catch (err) {
     console.error("❌ Kiryuu search error:", err.message);
