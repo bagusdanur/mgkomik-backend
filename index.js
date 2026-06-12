@@ -3294,37 +3294,23 @@ app.get("/kiryuu/search", async (req, res) => {
 
   try {
     // =============================
-    // 1. AXIOS INSTANCE (biar lolos bot)
+    // 1. AMBIL NONCE VIA PROXY
     // =============================
-    const client = axios.create({
-      withCredentials: true,
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        Connection: "keep-alive",
-      },
-      timeout: 15000,
-    });
-
-    // =============================
-    // 2. AMBIL NONCE + COOKIE
-    // =============================
-    const nonceRes = await client.get(
+    const nonceHTML = await kiryuuFetch(
       "https://v6.kiryuu.to/wp-admin/admin-ajax.php?type=search_form&action=get_nonce",
+      {
+        referer: "https://v6.kiryuu.to/advanced-search/",
+        timeout: 20000,
+      },
     );
 
-    const cookies = nonceRes.headers["set-cookie"] || [];
-
-    const nonceMatch = nonceRes.data.match(/value='(.*?)'/);
+    const nonceMatch = String(nonceHTML).match(/value=['"](.*?)['"]/);
     if (!nonceMatch) throw new Error("Nonce tidak ditemukan");
 
     const nonce = nonceMatch[1];
 
     // =============================
-    // 3. PARAMS SEARCH
+    // 2. PARAMS SEARCH
     // =============================
     const params = new URLSearchParams();
 
@@ -3347,24 +3333,27 @@ app.get("/kiryuu/search", async (req, res) => {
     params.append("project", "0");
 
     // =============================
-    // 4. REQUEST SEARCH
+    // 3. REQUEST SEARCH VIA PROXY
     // =============================
-    const { data } = await client.post(
-      "https://v6.kiryuu.to/wp-admin/admin-ajax.php",
-      params,
+    const searchUrl = "https://v6.kiryuu.to/wp-admin/admin-ajax.php";
+    const proxySearchUrl =
+      `${kiryuuProxyUrl(searchUrl)}&referer=${encodeURIComponent("https://v6.kiryuu.to/advanced-search/")}`;
+
+    const { data } = await axios.post(
+      proxySearchUrl,
+      params.toString(),
       {
+        timeout: 30000,
         headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
+          ...kiryuuHeaders("https://v6.kiryuu.to/advanced-search/"),
+          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
           "X-Requested-With": "XMLHttpRequest",
-          Referer: "https://v6.kiryuu.to/advanced-search/",
-          Origin: "https://v6.kiryuu.to",
-          Cookie: cookies.join("; "), // 🔥 penting
         },
       },
     );
 
     // =============================
-    // 5. PARSING
+    // 4. PARSING
     // =============================
     const $ = cheerio.load(data);
     const results = [];
