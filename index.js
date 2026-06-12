@@ -49,6 +49,12 @@ function kiryuuProxyUrl(url) {
   return `${KIRYUU_PROXY_URL}${separator}${encodeURIComponent(url)}`;
 }
 
+function toKiryuuProxyUrl(url) {
+  if (!url) return "";
+  const targetUrl = kiryuuUrl(String(url).trim());
+  return kiryuuProxyUrl(targetUrl) || targetUrl;
+}
+
 function isCloudflareChallenge(html = "") {
   return /Just a moment|cf_chl|challenge-platform|Enable JavaScript and cookies/i.test(
     String(html),
@@ -147,7 +153,7 @@ async function scrapeKiryuuPustaka({ page = 1 } = {}) {
 
       const link = $(el).find("a[href*='/manga/']").first().attr("href");
 
-      const image = $(el).find("img").first().attr("src") || "";
+      const image = toKiryuuProxyUrl($(el).find("img").first().attr("src") || "");
 
       // ambil slug
       const slug = link?.split("/manga/")[1]?.split("?")[0]?.replace(/\/$/, "");
@@ -252,7 +258,7 @@ async function scrapeKiryuuDetail(url) {
 
     const title = $("h1").first().text().trim();
 
-    const thumbnail = $("img.wp-post-image").attr("src") || "";
+    const thumbnail = toKiryuuProxyUrl($("img.wp-post-image").attr("src") || "");
 
     // ================= INFO =================
     const getInfo = (label) => {
@@ -386,7 +392,7 @@ async function scrapeKiryuuChapter(url) {
         src = "https:" + src;
       }
 
-      if (src) images.push(src);
+      if (src) images.push(toKiryuuProxyUrl(src));
     });
 
     // ================= TITLE =================
@@ -3282,7 +3288,7 @@ app.get("/kiryuu/search", async (req, res) => {
       const container = $(el);
 
       const link = container.find("a").first().attr("href") || "";
-      const image = container.find("img").first().attr("src") || "";
+      const image = toKiryuuProxyUrl(container.find("img").first().attr("src") || "");
 
       const title = container.find("a.text-base").first().text().trim();
 
