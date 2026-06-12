@@ -93,25 +93,22 @@ function rewriteKiryuuImages(payload, req) {
 
   if (!payload || typeof payload !== "object") return payload;
 
+  const rewritten = {};
   for (const [key, value] of Object.entries(payload)) {
     if ((key === "image" || key === "thumbnail") && typeof value === "string") {
-      payload[key] = toKiryuuBackendImageUrl(value, req);
-      continue;
-    }
-
-    if (key === "images" && Array.isArray(value)) {
-      payload[key] = value.map((imageUrl) =>
-        typeof imageUrl === "string" ? toKiryuuBackendImageUrl(imageUrl, req) : imageUrl,
-      );
+      rewritten[key] = toKiryuuBackendImageUrl(value, req);
       continue;
     }
 
     if (value && typeof value === "object") {
-      payload[key] = rewriteKiryuuImages(value, req);
+      rewritten[key] = rewriteKiryuuImages(value, req);
+      continue;
     }
+
+    rewritten[key] = value;
   }
 
-  return payload;
+  return rewritten;
 }
 
 function isCloudflareChallenge(html = "") {
@@ -451,7 +448,7 @@ async function scrapeKiryuuChapter(url) {
         src = "https:" + src;
       }
 
-      if (src) images.push(toKiryuuProxyUrl(src));
+      if (src) images.push(kiryuuUrl(src));
     });
 
     // ================= TITLE =================
