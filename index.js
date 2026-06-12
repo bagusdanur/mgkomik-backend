@@ -2,6 +2,7 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 const express = require("express");
 const https = require("https");
+const cloudscraper = require("cloudscraper");
 const app = express();
 const PORT = process.env.PORT || 3012;
 const cors = require("cors");
@@ -14,10 +15,106 @@ app.use(
 );
 
 const KOMIKU_IMAGE_WORKER = "https://cdnkm.konatanime17.workers.dev/";
+const KIRYUU_BASE_URL = "https://v6.kiryuu.to";
+const KIRYUU_PROXY_URL =
+  process.env.KIRYUU_PROXY_URL || "https://sekte.ezcantik9.workers.dev?url=";
 
 function toKomikuWorkerImageUrl(imageUrl) {
   if (!imageUrl) return "";
   return `${KOMIKU_IMAGE_WORKER}?url=${encodeURIComponent(imageUrl)}`;
+}
+
+function kiryuuHeaders(referer = `${KIRYUU_BASE_URL}/`) {
+  return {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    Accept:
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
+    Referer: referer,
+    Connection: "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+  };
+}
+
+function kiryuuUrl(path = "/") {
+  if (!path) return "";
+  if (path.startsWith("//")) return `https:${path}`;
+  return path.startsWith("http") ? path : `${KIRYUU_BASE_URL}${path}`;
+}
+
+function kiryuuProxyUrl(url) {
+  if (!KIRYUU_PROXY_URL) return "";
+  const separator = KIRYUU_PROXY_URL.includes("?") ? "" : "?url=";
+  return `${KIRYUU_PROXY_URL}${separator}${encodeURIComponent(url)}`;
+}
+
+function isCloudflareChallenge(html = "") {
+  return /Just a moment|cf_chl|challenge-platform|Enable JavaScript and cookies/i.test(
+    String(html),
+  );
+}
+
+async function kiryuuFetch(url, options = {}) {
+  const targetUrl = kiryuuUrl(url);
+  const referer = options.referer || `${KIRYUU_BASE_URL}/`;
+  const headers = {
+    ...kiryuuHeaders(referer),
+    ...(options.headers || {}),
+  };
+  const attempts = [];
+
+  const proxiedUrl = kiryuuProxyUrl(targetUrl);
+  if (proxiedUrl) {
+    attempts.push({
+      label: "proxy",
+      run: async () => {
+        const { data } = await axios.get(proxiedUrl, {
+          headers,
+          timeout: options.timeout || 20000,
+        });
+        return data;
+      },
+    });
+  }
+
+  attempts.push({
+    label: "direct",
+    run: async () => {
+      const { data } = await axios.get(targetUrl, {
+        headers,
+        timeout: options.timeout || 20000,
+        maxRedirects: 5,
+      });
+      return data;
+    },
+  });
+
+  attempts.push({
+    label: "cloudscraper",
+    run: async () =>
+      cloudscraper.get(targetUrl, {
+        headers,
+        timeout: options.timeout || 20000,
+      }),
+  });
+
+  const errors = [];
+  for (const attempt of attempts) {
+    try {
+      const html = await attempt.run();
+      if (typeof html === "string" && html.trim() && !isCloudflareChallenge(html)) {
+        return html;
+      }
+      errors.push(`${attempt.label}:cloudflare-challenge`);
+    } catch (err) {
+      errors.push(
+        `${attempt.label}:${err.response?.status || err.statusCode || err.code || err.message}`,
+      );
+    }
+  }
+
+  throw new Error(`Kiryuu fetch gagal (${targetUrl}): ${errors.join(" -> ")}`);
 }
 
 
@@ -36,25 +133,11 @@ function convertTimeToID(text) {
 
 async function scrapeKiryuuPustaka({ page = 1 } = {}) {
   try {
-    const url =
-      page === 1
-        ? "https://v6.kiryuu.to/latest/"
-        : `https://v6.kiryuu.to/latest/?the_page=${page}`;
+    const url = page === 1 ? "/latest/" : `/latest/?the_page=${page}`;
 
-    console.log("🔥 URL:", url);
+    console.log("Kiryuu terbaru URL:", kiryuuUrl(url));
 
-    const { data } = await axios.get(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
-        Referer: "https://v6.kiryuu.to/",
-        Connection: "keep-alive",
-      },
-      timeout: 15000,
-    });
+    const data = await kiryuuFetch(url, { timeout: 20000 });
 
     const $ = cheerio.load(data);
     const results = [];
@@ -147,7 +230,7 @@ async function scrapeKiryuuPustaka({ page = 1 } = {}) {
       data: results,
     };
   } catch (err) {
-    console.error("❌ Kiryuu Latest error:", err.message);
+    console.error("Kiryuu terbaru error:", err.message);
 
     return {
       success: false,
@@ -163,18 +246,7 @@ async function scrapeKiryuuPustaka({ page = 1 } = {}) {
 
 async function scrapeKiryuuDetail(url) {
   try {
-    const { data } = await axios.get(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
-        Referer: "https://v6.kiryuu.to/",
-        Connection: "keep-alive",
-      },
-      timeout: 15000,
-    });
+    const data = await kiryuuFetch(url, { timeout: 20000 });
 
     const $ = cheerio.load(data);
 
@@ -221,15 +293,13 @@ async function scrapeKiryuuDetail(url) {
       if (manga_id) {
         const ajaxUrl = `https://v6.kiryuu.to/wp-admin/admin-ajax.php?manga_id=${manga_id}&page=1&action=chapter_list`;
 
-        const { data: chapterHTML } = await axios.get(ajaxUrl, {
+        const chapterHTML = await kiryuuFetch(ajaxUrl, {
+          referer: url,
+          timeout: 20000,
           headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
             Accept:
               "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
-            Referer: "https://v6.kiryuu.to/",
-            Connection: "keep-alive",
+            "X-Requested-With": "XMLHttpRequest",
           },
         });
 
@@ -257,7 +327,7 @@ async function scrapeKiryuuDetail(url) {
         });
       }
     } catch (err) {
-      console.log("Error ambil chapter:", err.message);
+      console.log("Gagal ambil daftar chapter Kiryuu:", err.message);
     }
 
     chapters.reverse();
@@ -284,7 +354,7 @@ async function scrapeKiryuuDetail(url) {
       },
     };
   } catch (err) {
-    console.error("Error Kiryuu:", err.message);
+    console.error("Kiryuu detail error:", err.message);
 
     return {
       success: false,
@@ -295,14 +365,7 @@ async function scrapeKiryuuDetail(url) {
 
 async function scrapeKiryuuChapter(url) {
   try {
-    const { data } = await axios.get(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/123 Safari/537.36",
-        Referer: "https://v6.kiryuu.to/",
-      },
-      timeout: 15000,
-    });
+    const data = await kiryuuFetch(url, { timeout: 20000 });
 
     const $ = cheerio.load(data);
 
@@ -371,7 +434,7 @@ async function scrapeKiryuuChapter(url) {
       images,
     };
   } catch (err) {
-    console.error("Error scrape:", err.message);
+    console.error("Kiryuu chapter error:", err.message);
     return {
       success: false,
       message: err.message,
