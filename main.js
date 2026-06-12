@@ -1531,4 +1531,6 @@ app.get("/neko/image", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`🚀 Server jalan di http://localhost:${PORT}`));
+app.listen(3014, "0.0.0.0", () => {
+  console.log("🚀 Server jalan di http://localhost:3014");
+});
