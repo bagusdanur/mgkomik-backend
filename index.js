@@ -3359,7 +3359,10 @@ app.get("/kiryuu/search", async (req, res) => {
       const container = $(el);
 
       const link = container.find("a").first().attr("href") || "";
-      const image = toKiryuuProxyUrl(container.find("img").first().attr("src") || "");
+      const image = kiryuuUrl(container.find("img").first().attr("src") || "").replace(
+        /^http:\/\/v6\.kiryuu\.to/i,
+        KIRYUU_BASE_URL,
+      );
 
       const title = container.find("a.text-base").first().text().trim();
 
@@ -3392,7 +3395,7 @@ app.get("/kiryuu/search", async (req, res) => {
       success: true,
       total: results.length,
       query: q,
-      data: rewriteKiryuuImages(results, req),
+      data: results,
     });
   } catch (err) {
     console.error("❌ Kiryuu search error:", err.message);
