@@ -29,6 +29,14 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function getRequestBaseUrl(req) {
+  const forwardedProto = req.headers["x-forwarded-proto"];
+  const proto = Array.isArray(forwardedProto)
+    ? forwardedProto[0]
+    : String(forwardedProto || req.protocol || "http").split(",")[0].trim();
+  return `${proto}://${req.get("host")}`;
+}
+
 const axiosInstance = axios.create({
   timeout: 8000,
   headers: {
@@ -1502,11 +1510,167 @@ app.get("/animeid/episode/:slug", async (req, res) => {
   const { slug } = req.params;
   if (!slug) return res.status(400).json({ success: false, message: "Slug diperlukan" });
   const cacheKey = `animeid_episode_${slug}`;
-  const cached = getCache(cacheKey);
-  if (cached) return res.json(cached);
-  const result = await scrapeNontonAnimeEpisode(animeidEpisodeUrl(slug));
-  if (result.success) setCache(cacheKey, result, 600);
+  
+  let result = getCache(cacheKey);
+  if (!result) {
+    result = await scrapeNontonAnimeEpisode(animeidEpisodeUrl(slug));
+    if (result.success) {
+      setCache(cacheKey, result, 600);
+    }
+  }
+
+  // Clone and rewrite players to use the video-proxy locally (ONLY for kotakanimeid.link)
+  if (result.success && result.data && Array.isArray(result.data.players)) {
+    const modifiedResult = JSON.parse(JSON.stringify(result));
+    modifiedResult.data.players = modifiedResult.data.players.map((p) => {
+      if (p.iframe && p.iframe.includes("kotakanimeid.link")) {
+        return {
+          ...p,
+          iframe: `${getRequestBaseUrl(req)}/animeid/video-proxy?url=${encodeURIComponent(p.iframe)}`,
+        };
+      }
+      return p;
+    });
+    return res.json(modifiedResult);
+  }
+
   res.json(result);
+});
+
+app.get("/animeid/video-proxy", async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).send("url required");
+
+  try {
+    const response = await axios.get(url, {
+      timeout: 20000,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        Referer: "https://s13.nontonanimeid.boats/",
+      },
+    });
+
+    let html = response.data;
+
+    // Bypass frame-busting/embed domain alert check
+    html = html.replace(/function\s+showAlert\s*\(\)\s*\{/g, "function showAlert() { return;");
+
+    // Decrypt and resolve direct stream URL to avoid CORS/Origin blocks (error 202000 / 403)
+    const encryptRegex = /var\s+([a-zA-Z0-9_$]+)\s*=\s*\[([\d,\s]+)\];\s*(?:var\s+)?([a-zA-Z0-9_$]+)\s*=\s*atob\("([^"]+)"\);/;
+    const match = html.match(encryptRegex);
+    if (match) {
+      try {
+        const keys = match[2].split(",").map(Number);
+        const base64Data = match[4];
+        const encryptedBytes = Buffer.from(base64Data, "base64");
+        let decryptedJs = "";
+        for (let i = 0; i < encryptedBytes.length; i++) {
+          decryptedJs += String.fromCharCode(encryptedBytes[i] ^ keys[i % keys.length]);
+        }
+
+        // Extract the stream URL (e.g. https://s1.kotakanimeid.link/go/dl/?url=...)
+        const fileMatch = decryptedJs.match(/"file"\s*:\s*"([^"]+)"/);
+        if (fileMatch) {
+          const streamUrl = fileMatch[1];
+          
+          // Resolve the redirect on the backend (sends referer)
+          const redirectRes = await axios.get(streamUrl, {
+            maxRedirects: 0,
+            validateStatus: (status) => status >= 200 && status < 400,
+            headers: {
+              "User-Agent":
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+              Referer: "https://s13.nontonanimeid.boats/",
+            },
+          });
+
+          const directCdnUrl = redirectRes.headers.location;
+          if (directCdnUrl) {
+            // Re-route the stream through our backend proxy to strip the browser's blocked Origin header
+            const cleanCdnUrl = directCdnUrl.replace(/^https?:\/\//, "");
+            const proxiedStreamUrl = `${getRequestBaseUrl(req)}/animeid/stream-proxy/${cleanCdnUrl}`;
+            decryptedJs = decryptedJs.replace(streamUrl, proxiedStreamUrl);
+          }
+        }
+
+        // Replace the entire anonymous function script tag with the decrypted and modified JS
+        const scriptBlockRegex = /<script>\(function\(\)\{[\s\S]+?<\/script>/;
+        html = html.replace(scriptBlockRegex, `<script>\n${decryptedJs}\n</script>`);
+      } catch (decryptErr) {
+        console.error("Gagal mendecrypt atau meresolve stream URL:", decryptErr.message);
+      }
+    }
+
+    // Inject base href tag to make relative assets work
+    const urlObj = new URL(url);
+    const origin = urlObj.origin + "/";
+    if (html.includes("<head>")) {
+      html = html.replace("<head>", `<head><base href="${origin}">`);
+    } else {
+      html = `<base href="${origin}">` + html;
+    }
+
+    res.set("Content-Type", "text/html; charset=UTF-8");
+    res.send(html);
+  } catch (err) {
+    console.error("AnimeID video proxy error:", err.message);
+    res.status(502).send("Gagal memuat video");
+  }
+});
+
+app.get(/^\/animeid\/stream-proxy\/(.+)/, async (req, res) => {
+  const targetPath = req.params[0];
+  if (!targetPath) return res.status(400).send("Path required");
+
+  // Reconstruct the original target URL including any query parameters (seeks/signatures)
+  const queryStr = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
+  const targetUrl = `https://${targetPath}${queryStr}`;
+
+  try {
+    const headers = {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "Referer": "https://s1.kotakanimeid.link/",
+    };
+
+    // Forward Range header if requested (critical for partial content and seek in players)
+    if (req.headers.range) {
+      headers["Range"] = req.headers.range;
+    }
+
+    const response = await axios({
+      method: "get",
+      url: targetUrl,
+      responseType: "stream",
+      headers,
+      timeout: 30000,
+    });
+
+    // Copy stream headers from source
+    if (response.headers["content-type"]) {
+      res.set("Content-Type", response.headers["content-type"]);
+    }
+    if (response.headers["content-length"]) {
+      res.set("Content-Length", response.headers["content-length"]);
+    }
+    if (response.headers["content-range"]) {
+      res.set("Content-Range", response.headers["content-range"]);
+    }
+    if (response.headers["accept-ranges"]) {
+      res.set("Accept-Ranges", response.headers["accept-ranges"]);
+    }
+
+    // Set CORS headers
+    res.set("Access-Control-Allow-Origin", "*");
+    res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+    res.set("Access-Control-Allow-Headers", "*");
+
+    response.data.pipe(res);
+  } catch (err) {
+    console.error("Stream proxy error for:", targetUrl, err.message);
+    res.status(502).send("Gagal mengambil stream");
+  }
 });
 
 app.get("/neko/image", async (req, res) => {
