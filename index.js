@@ -2,17 +2,99 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 const express = require("express");
 const https = require("https");
+const http = require("http");
 const cloudscraper = require("cloudscraper");
-const app = express();
-const PORT = process.env.PORT || 3012;
 const cors = require("cors");
 
+const app = express();
+const PORT = process.env.PORT || 3012;
 
 app.use(
   cors({
     origin: "*",
   }),
 );
+
+// ==========================================
+// 🛠️ OPTIMIZATION UTILITIES: CACHING & AGENT
+// ==========================================
+
+const keepAliveAgentHttp = new http.Agent({
+  keepAlive: true,
+  maxSockets: 100,
+  maxFreeSockets: 10,
+  timeout: 60000,
+});
+
+const keepAliveAgentHttps = new https.Agent({
+  keepAlive: true,
+  maxSockets: 100,
+  maxFreeSockets: 10,
+  timeout: 60000,
+});
+
+// Konfigurasi Axios default menggunakan Keep-Alive Agent
+axios.defaults.httpAgent = keepAliveAgentHttp;
+axios.defaults.httpsAgent = keepAliveAgentHttps;
+
+// Map cache dalam memori
+const globalMemoryCache = new Map();
+
+// Helper untuk membaca cache
+function getCache(key) {
+  const item = globalMemoryCache.get(key);
+  if (!item) return null;
+  if (Date.now() > item.expiry) {
+    globalMemoryCache.delete(key);
+    return null;
+  }
+  return item.data;
+}
+
+// Helper untuk menyimpan cache
+function setCache(key, data, ttlInSeconds) {
+  globalMemoryCache.set(key, {
+    data,
+    expiry: Date.now() + ttlInSeconds * 1000,
+  });
+}
+
+// Routine pembersihan cache kadaluwarsa setiap 5 menit (mencegah memory leak)
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, item] of globalMemoryCache.entries()) {
+    if (now > item.expiry) {
+      globalMemoryCache.delete(key);
+    }
+  }
+}, 5 * 60 * 1000).unref();
+
+// Map Request Coalescing untuk melacak scrape yang sedang berjalan
+const activeScrapes = new Map();
+
+async function coalescedScrape(urlKey, scrapeFn) {
+  if (activeScrapes.has(urlKey)) {
+    console.log(`🔗 [Coalescing] Reusing active scrape promise for: ${urlKey}`);
+    return activeScrapes.get(urlKey);
+  }
+  
+  const promise = (async () => {
+    try {
+      return await scrapeFn();
+    } catch (err) {
+      throw err;
+    }
+  })();
+  
+  activeScrapes.set(urlKey, promise);
+  
+  try {
+    return await promise;
+  } finally {
+    activeScrapes.delete(urlKey);
+  }
+}
+
 
 const KOMIKU_IMAGE_WORKER = "https://cdnkm.konatanime17.workers.dev/";
 const KIRYUU_BASE_URL = "https://v6.kiryuu.to";
@@ -2917,36 +2999,62 @@ app.get("/", (req, res) => {
 
 // === Route: Komiku Terbaru ===
 app.get("/komiku/terbaru", async (req, res) => {
-  const data = await scrapeKomikuTerbaru();
-  if (data.length === 0)
-    return res
-      .status(500)
-      .json({ success: false, message: "Gagal mengambil data terbaru." });
+  const cacheKey = "komiku:terbaru";
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
+  }
 
-  res.json({ success: true, total: data.length, data });
+  try {
+    const data = await coalescedScrape(cacheKey, () => scrapeKomikuTerbaru());
+    if (data.length === 0) {
+      return res
+        .status(500)
+        .json({ success: false, message: "Gagal mengambil data terbaru." });
+    }
+
+    const responseData = { success: true, total: data.length, data };
+    setCache(cacheKey, responseData, 60); // 1 menit (60 detik)
+    res.json(responseData);
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 });
 
 // === Home (Gabungan semua data: Terbaru + Populer Manga/Manhwa/Manhua) ===
 app.get("/komiku/home", async (_, res) => {
-  try {
-    const [terbaru, populerManga, populerManhwa, populerManhua] =
-      await Promise.all([
-        scrapeKomikuTerbaru(),
-        scrapeKomikuPopuler("Manga"),
-        scrapeKomikuPopuler("Manhwa"),
-        scrapeKomikuPopuler("Manhua"),
-      ]);
+  const cacheKey = "komiku:home";
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
+  }
 
-    res.json({
-      success: true,
-      message: "Gabungan semua data komik",
-      data: {
-        terbaru,
-        populer_manga: populerManga,
-        populer_manhwa: populerManhwa,
-        populer_manhua: populerManhua,
-      },
+  try {
+    const responseData = await coalescedScrape(cacheKey, async () => {
+      const [terbaru, populerManga, populerManhwa, populerManhua] =
+        await Promise.all([
+          scrapeKomikuTerbaru(),
+          scrapeKomikuPopuler("Manga"),
+          scrapeKomikuPopuler("Manhwa"),
+          scrapeKomikuPopuler("Manhua"),
+        ]);
+
+      return {
+        success: true,
+        message: "Gabungan semua data komik",
+        data: {
+          terbaru,
+          populer_manga: populerManga,
+          populer_manhwa: populerManhwa,
+          populer_manhua: populerManhua,
+        },
+      };
     });
+
+    setCache(cacheKey, responseData, 60); // 1 menit (60 detik)
+    res.json(responseData);
   } catch (err) {
     console.error("Gagal ambil data home:", err.message);
     res.status(500).json({
@@ -2960,84 +3068,129 @@ app.get("/komiku/home", async (_, res) => {
 // === Route: Detail Komik ===
 app.get("/komiku/detail/:slug", async (req, res) => {
   const { slug } = req.params;
-  if (!slug)
+  if (!slug) {
     return res
       .status(400)
       .json({ success: false, message: "Slug tidak diberikan!" });
+  }
 
-  const fullUrl = `https://komiku.org/manga/${slug}/`;
-  const result = await scrapeKomikuDetail(fullUrl);
-  res.json(result);
+  const cacheKey = `komiku:detail:${slug}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
+  }
+
+  try {
+    const result = await coalescedScrape(cacheKey, () => {
+      const fullUrl = `https://komiku.org/manga/${slug}/`;
+      return scrapeKomikuDetail(fullUrl);
+    });
+
+    if (result && result.success) {
+      setCache(cacheKey, result, 900); // 15 menit (900 detik)
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 });
-
-
 
 // === Route: Chapter ===
 app.get("/komiku/chapter/:slug", async (req, res) => {
   const { slug } = req.params;
-  if (!slug)
+  if (!slug) {
     return res
       .status(400)
       .json({ success: false, message: "Slug tidak diberikan!" });
-
-  const fullUrl = `https://komiku.org/${slug}/`;
-  const result = await scrapeKomikuChapter(fullUrl);
-
-  if (result?.success && Array.isArray(result.images)) {
-    result.images = result.images
-      .filter(Boolean)
-      .map((imageUrl) => toKomikuWorkerImageUrl(imageUrl));
   }
 
-  res.json(result);
+  const cacheKey = `komiku:chapter:${slug}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
+  }
+
+  try {
+    const result = await coalescedScrape(cacheKey, async () => {
+      const fullUrl = `https://komiku.org/${slug}/`;
+      const resData = await scrapeKomikuChapter(fullUrl);
+
+      if (resData?.success && Array.isArray(resData.images)) {
+        resData.images = resData.images
+          .filter(Boolean)
+          .map((imageUrl) => toKomikuWorkerImageUrl(imageUrl));
+      }
+      return resData;
+    });
+
+    if (result && result.success) {
+      setCache(cacheKey, result, 7200); // 2 jam (7200 detik)
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 });
 
 app.get("/komiku/search", async (req, res) => {
   const { q } = req.query;
-  if (!q)
+  if (!q) {
     return res
       .status(400)
       .json({ success: false, message: "Masukkan parameter ?q=" });
+  }
+
+  const cacheKey = `komiku:search:${q}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
+  }
 
   try {
-    const url = `https://api.komiku.org/?post_type=manga&s=${encodeURIComponent(
-      q,
-    )}`;
-    const { data } = await axios.get(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-      },
-      timeout: 9000, // 9 detik
-    });
-
-    const $ = cheerio.load(data);
-    const results = [];
-
-    $(".bge").each((_, el) => {
-      const title = $(el).find(".kan h3").text().trim();
-      const img =
-        $(el).find(".bgei img").attr("src") ||
-        $(el).find(".bgei img").attr("data-src");
-      const link = $(el).find(".bgei a").attr("href");
-      const update = $(el).find(".kan p").text().trim();
-
-      results.push({
-        title,
-        image: img?.startsWith("http") ? img : `https://komiku.org${img}`,
-        detail_link: link?.startsWith("http")
-          ? link
-          : `https://komiku.org${link}`,
-        update,
+    const responseData = await coalescedScrape(cacheKey, async () => {
+      const url = `https://api.komiku.org/?post_type=manga&s=${encodeURIComponent(q)}`;
+      const { data } = await axios.get(url, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        },
+        timeout: 9000,
       });
+
+      const $ = cheerio.load(data);
+      const results = [];
+
+      $(".bge").each((_, el) => {
+        const title = $(el).find(".kan h3").text().trim();
+        const img =
+          $(el).find(".bgei img").attr("src") ||
+          $(el).find(".bgei img").attr("data-src");
+        const link = $(el).find(".bgei a").attr("href");
+        const update = $(el).find(".kan p").text().trim();
+
+        results.push({
+          title,
+          image: img?.startsWith("http") ? img : `https://komiku.org${img}`,
+          detail_link: link?.startsWith("http")
+            ? link
+            : `https://komiku.org${link}`,
+          update,
+        });
+      });
+
+      return {
+        success: true,
+        total: results.length,
+        query: q,
+        data: results,
+      };
     });
 
-    res.json({
-      success: true,
-      total: results.length,
-      query: q,
-      data: results,
-    });
+    setCache(cacheKey, responseData, 60); // 1 menit (60 detik)
+    res.json(responseData);
   } catch (err) {
     console.error(err.message);
     res
@@ -3046,43 +3199,34 @@ app.get("/komiku/search", async (req, res) => {
   }
 });
 
-const komikuCache = {};
-const CACHE_DURATION = 2000 * 60 * 30; // 30 menit
-
 app.get("/komiku/list", async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const huruf = req.query.huruf || null;
     const tipe = req.query.tipe || null;
 
-    const cacheKey = `p:${page}|h:${huruf}|t:${tipe}`;
+    const cacheKey = `komiku:list:p:${page}:h:${huruf}:t:${tipe}`;
+    const cached = getCache(cacheKey);
+    if (cached) {
+      console.log(`⚡ [Cache Hit] ${cacheKey}`);
+      return res.json(cached);
+    }
 
-    // ================= CACHE =================
-    if (
-      !komikuCache[cacheKey] ||
-      Date.now() - komikuCache[cacheKey].time > CACHE_DURATION
-    ) {
-      console.log("🔄 Scrape Komiku:", cacheKey);
-
+    const responseData = await coalescedScrape(cacheKey, async () => {
       const data = await scrapeKomikuList({
         page,
         huruf,
         tipe,
       });
-
-      komikuCache[cacheKey] = {
-        time: Date.now(),
-        data,
+      return {
+        success: true,
+        source: "komiku",
+        ...data,
       };
-    } else {
-      console.log("⚡ Cache Komiku:", cacheKey);
-    }
-
-    res.json({
-      success: true,
-      source: "komiku",
-      ...komikuCache[cacheKey].data,
     });
+
+    setCache(cacheKey, responseData, 60); // 1 menit (60 detik)
+    res.json(responseData);
   } catch (err) {
     console.error("❌ API /komiku/list error:", err.message);
     res.status(500).json({
@@ -3095,14 +3239,31 @@ app.get("/komiku/list", async (req, res) => {
 app.get("/genre/:genre", async (req, res) => {
   const { genre } = req.params;
   const { page } = req.query;
+  const currentPage = page || 1;
 
-  const data = await scrapeGenreKomiku(genre, page || 1);
-  res.json({
-    genre,
-    page: page || 1,
-    total: data.length,
-    results: data,
-  });
+  const cacheKey = `komiku:genre:${genre}:p:${currentPage}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
+  }
+
+  try {
+    const responseData = await coalescedScrape(cacheKey, async () => {
+      const data = await scrapeGenreKomiku(genre, currentPage);
+      return {
+        genre,
+        page: currentPage,
+        total: data.length,
+        results: data,
+      };
+    });
+
+    setCache(cacheKey, responseData, 60); // 1 menit
+    res.json(responseData);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // =======================================================
@@ -3111,72 +3272,112 @@ app.get("/genre/:genre", async (req, res) => {
 app.get("/komiku/pustaka", async (req, res) => {
   const page = parseInt(req.query.page) || 1;
 
-  const data = await scrapeKomikuPustaka(page);
-
-  if (!data.length) {
-    return res.json({
-      success: true,
-      page,
-      total: 0,
-      data: [],
-      warning: "Data kosong / API Komiku sedang limit",
-    });
+  const cacheKey = `komiku:pustaka:p:${page}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
   }
 
-  res.json({
-    success: true,
-    source: "api.komiku.org",
-    page,
-    total: data.length,
-    data,
-  });
+  try {
+    const responseData = await coalescedScrape(cacheKey, async () => {
+      const data = await scrapeKomikuPustaka(page);
+      if (!data.length) {
+        return {
+          success: true,
+          page,
+          total: 0,
+          data: [],
+          warning: "Data kosong / API Komiku sedang limit",
+        };
+      }
+      return {
+        success: true,
+        source: "api.komiku.org",
+        page,
+        total: data.length,
+        data,
+      };
+    });
+
+    setCache(cacheKey, responseData, 60); // 1 menit
+    res.json(responseData);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 app.get("/komiku/filters", async (req, res) => {
-  const data = await scrapeKomikuFilters();
+  const cacheKey = "komiku:filters";
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
+  }
 
-  res.json({
-    success: true,
-    data,
-  });
+  try {
+    const responseData = await coalescedScrape(cacheKey, async () => {
+      const data = await scrapeKomikuFilters();
+      return {
+        success: true,
+        data,
+      };
+    });
+
+    setCache(cacheKey, responseData, 43200); // 12 jam
+    res.json(responseData);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 app.get("/komiku/pustaka-filter", async (req, res) => {
   try {
     const { orderby, tipe, genre, genre2, status } = req.query;
-
     const page = Math.max(1, parseInt(req.query.page) || 1);
 
-    console.log("🔄 Scrape Filter:", {
-      page,
-      orderby,
-      tipe,
-      genre,
-      genre2,
-      status,
-    });
+    const cacheKey = `komiku:pustaka-filter:o:${orderby}:t:${tipe}:g:${genre}:g2:${genre2}:s:${status}:p:${page}`;
+    const cached = getCache(cacheKey);
+    if (cached) {
+      console.log(`⚡ [Cache Hit] ${cacheKey}`);
+      return res.json(cached);
+    }
 
-    const data = await scrapeKomikuPustakaFilter({
-      orderby,
-      tipe,
-      genre,
-      genre2,
-      status,
-      page,
-    });
-
-    res.json({
-      success: true,
-      query: {
+    const responseData = await coalescedScrape(cacheKey, async () => {
+      console.log("🔄 Scrape Filter:", {
         page,
         orderby,
         tipe,
         genre,
         genre2,
         status,
-      },
-      ...data,
+      });
+
+      const data = await scrapeKomikuPustakaFilter({
+        orderby,
+        tipe,
+        genre,
+        genre2,
+        status,
+        page,
+      });
+
+      return {
+        success: true,
+        query: {
+          page,
+          orderby,
+          tipe,
+          genre,
+          genre2,
+          status,
+        },
+        ...data,
+      };
     });
+
+    setCache(cacheKey, responseData, 60); // 1 menit
+    res.json(responseData);
   } catch (err) {
     console.error("❌ API filter error:", err.message);
     res.status(500).json({
@@ -3189,25 +3390,41 @@ app.get("/komiku/pustaka-filter", async (req, res) => {
 app.get("/kiryuu/pustaka", async (req, res) => {
   const page = parseInt(req.query.page) || 1;
 
-  const result = await scrapeKiryuuPustaka({ page });
-
-  if (!result.data.length) {
-    return res.json({
-      success: true,
-      page,
-      total: 0,
-      data: [],
-      warning: "Data kosong / Kiryuu limit",
-    });
+  const cacheKey = `kiryuu:pustaka:p:${page}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
   }
 
-  res.json({
-    success: true,
-    source: "v6.kiryuu.to",
-    page,
-    total: result.data.length,
-    data: rewriteKiryuuImages(result.data, req),
-  });
+  try {
+    const responseData = await coalescedScrape(cacheKey, async () => {
+      const result = await scrapeKiryuuPustaka({ page });
+
+      if (!result.data.length) {
+        return {
+          success: true,
+          page,
+          total: 0,
+          data: [],
+          warning: "Data kosong / Kiryuu limit",
+        };
+      }
+
+      return {
+        success: true,
+        source: "v6.kiryuu.to",
+        page,
+        total: result.data.length,
+        data: rewriteKiryuuImages(result.data, req),
+      };
+    });
+
+    setCache(cacheKey, responseData, 60); // 1 menit
+    res.json(responseData);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 app.get("/kiryuu/image", async (req, res) => {
@@ -3237,24 +3454,34 @@ app.get("/kiryuu/image", async (req, res) => {
 });
 
 app.get("/kiryuu/detail/:slug", async (req, res) => {
+  const { slug } = req.params;
+  if (!slug) {
+    return res.status(400).json({
+      success: false,
+      message: "Slug tidak diberikan!",
+    });
+  }
+
+  const cacheKey = `kiryuu:detail:${slug}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
+  }
+
   try {
-    const { slug } = req.params;
+    const result = await coalescedScrape(cacheKey, async () => {
+      const fullUrl = `https://v6.kiryuu.to/manga/${slug}/`;
+      const details = await scrapeKiryuuDetail(fullUrl);
+      return rewriteKiryuuImages(details, req);
+    });
 
-    if (!slug) {
-      return res.status(400).json({
-        success: false,
-        message: "Slug tidak diberikan!",
-      });
+    if (result && result.success) {
+      setCache(cacheKey, result, 900); // 15 menit
     }
-
-    const fullUrl = `https://v6.kiryuu.to/manga/${slug}/`;
-
-    const result = await scrapeKiryuuDetail(fullUrl);
-
-    res.json(rewriteKiryuuImages(result, req));
+    res.json(result);
   } catch (err) {
     console.error("Route error:", err.message);
-
     res.status(500).json({
       success: false,
       message: "Terjadi kesalahan pada server",
@@ -3263,14 +3490,26 @@ app.get("/kiryuu/detail/:slug", async (req, res) => {
 });
 
 app.get(/^\/kiryuu\/chapter\/(.+)/, async (req, res) => {
+  const slug = req.params[0];
+
+  const cacheKey = `kiryuu:chapter:${slug}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
+  }
+
   try {
-    const slug = req.params[0];
+    const result = await coalescedScrape(cacheKey, async () => {
+      const fullUrl = `https://v6.kiryuu.to/manga/${slug}/`;
+      const chapter = await scrapeKiryuuChapter(fullUrl);
+      return rewriteKiryuuImages(chapter, req);
+    });
 
-    const fullUrl = `https://v6.kiryuu.to/manga/${slug}/`;
-
-    const result = await scrapeKiryuuChapter(fullUrl);
-
-    res.json(rewriteKiryuuImages(result, req));
+    if (result && result.success) {
+      setCache(cacheKey, result, 7200); // 2 jam
+    }
+    res.json(result);
   } catch (err) {
     res.json({
       success: false,
@@ -3281,7 +3520,6 @@ app.get(/^\/kiryuu\/chapter\/(.+)/, async (req, res) => {
 
 app.get("/kiryuu/search", async (req, res) => {
   const { q } = req.query;
-
   if (!q) {
     return res.status(400).json({
       success: false,
@@ -3289,118 +3527,111 @@ app.get("/kiryuu/search", async (req, res) => {
     });
   }
 
+  const cacheKey = `kiryuu:search:${q}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
+  }
+
   try {
-    // =============================
-    // 1. AMBIL NONCE VIA PROXY
-    // =============================
-    const nonceHTML = await kiryuuFetch(
-      "https://v6.kiryuu.to/wp-admin/admin-ajax.php?type=search_form&action=get_nonce",
-      {
-        referer: "https://v6.kiryuu.to/advanced-search/",
-        timeout: 20000,
-      },
-    );
-
-    const nonceMatch = String(nonceHTML).match(/value=['"](.*?)['"]/);
-    if (!nonceMatch) throw new Error("Nonce tidak ditemukan");
-
-    const nonce = nonceMatch[1];
-
-    // =============================
-    // 2. PARAMS SEARCH
-    // =============================
-    const params = new URLSearchParams();
-
-    params.append("action", "advanced_search");
-    params.append("nonce", nonce);
-    params.append("query", q);
-    params.append("page", "1");
-    params.append("order", "desc");
-    params.append("orderby", "updated");
-    params.append("inclusion", "OR");
-    params.append("exclusion", "OR");
-
-    // array wajib []
-    params.append("genre[]", "");
-    params.append("genre_exclude[]", "");
-    params.append("author[]", "");
-    params.append("artist[]", "");
-    params.append("type[]", "");
-    params.append("status[]", "");
-    params.append("project", "0");
-
-    // =============================
-    // 3. REQUEST SEARCH VIA PROXY
-    // =============================
-    const searchUrl = "https://v6.kiryuu.to/wp-admin/admin-ajax.php";
-    const proxySearchUrl =
-      `${kiryuuProxyUrl(searchUrl)}&referer=${encodeURIComponent("https://v6.kiryuu.to/advanced-search/")}`;
-
-    const { data } = await axios.post(
-      proxySearchUrl,
-      params.toString(),
-      {
-        timeout: 30000,
-        headers: {
-          ...kiryuuHeaders("https://v6.kiryuu.to/advanced-search/"),
-          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-          "X-Requested-With": "XMLHttpRequest",
+    const responseData = await coalescedScrape(cacheKey, async () => {
+      // 1. AMBIL NONCE VIA PROXY
+      const nonceHTML = await kiryuuFetch(
+        "https://v6.kiryuu.to/wp-admin/admin-ajax.php?type=search_form&action=get_nonce",
+        {
+          referer: "https://v6.kiryuu.to/advanced-search/",
+          timeout: 20000,
         },
-      },
-    );
-
-    // =============================
-    // 4. PARSING
-    // =============================
-    const $ = cheerio.load(data);
-    const results = [];
-
-    $(".flex.rounded-lg.overflow-hidden").each((_, el) => {
-      const container = $(el);
-
-      const link = container.find("a").first().attr("href") || "";
-      const image = kiryuuUrl(container.find("img").first().attr("src") || "").replace(
-        /^http:\/\/v6\.kiryuu\.to/i,
-        KIRYUU_BASE_URL,
       );
 
-      const title = container.find("a.text-base").first().text().trim();
+      const nonceMatch = String(nonceHTML).match(/value=['"](.*?)['"]/);
+      if (!nonceMatch) throw new Error("Nonce tidak ditemukan");
 
-      const latestChapter = container
-        .find("span.text-sm")
-        .first()
-        .text()
-        .trim();
+      const nonce = nonceMatch[1];
 
-      const status = container.find("span.bg-accent").first().text().trim();
+      // 2. PARAMS SEARCH
+      const params = new URLSearchParams();
+      params.append("action", "advanced_search");
+      params.append("nonce", nonce);
+      params.append("query", q);
+      params.append("page", "1");
+      params.append("order", "desc");
+      params.append("orderby", "updated");
+      params.append("inclusion", "OR");
+      params.append("exclusion", "OR");
+      params.append("genre[]", "");
+      params.append("genre_exclude[]", "");
+      params.append("author[]", "");
+      params.append("artist[]", "");
+      params.append("type[]", "");
+      params.append("status[]", "");
+      params.append("project", "0");
 
-      const update = latestChapter
-        ? `${latestChapter}${status ? ` • ${status}` : ""}`
-        : "";
+      // 3. REQUEST SEARCH VIA PROXY
+      const searchUrl = "https://v6.kiryuu.to/wp-admin/admin-ajax.php";
+      const proxySearchUrl =
+        `${kiryuuProxyUrl(searchUrl)}&referer=${encodeURIComponent("https://v6.kiryuu.to/advanced-search/")}`;
 
-      if (title && link) {
-        results.push({
-          title,
-          image,
-          detail_link: link,
-          update,
-        });
-      }
+      const { data } = await axios.post(
+        proxySearchUrl,
+        params.toString(),
+        {
+          timeout: 30000,
+          headers: {
+            ...kiryuuHeaders("https://v6.kiryuu.to/advanced-search/"),
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "X-Requested-With": "XMLHttpRequest",
+          },
+        },
+      );
+
+      // 4. PARSING
+      const $ = cheerio.load(data);
+      const results = [];
+
+      $(".flex.rounded-lg.overflow-hidden").each((_, el) => {
+        const container = $(el);
+        const link = container.find("a").first().attr("href") || "";
+        const image = kiryuuUrl(container.find("img").first().attr("src") || "").replace(
+          /^http:\/\/v6\.kiryuu\.to/i,
+          KIRYUU_BASE_URL,
+        );
+
+        const title = container.find("a.text-base").first().text().trim();
+        const latestChapter = container
+          .find("span.text-sm")
+          .first()
+          .text()
+          .trim();
+
+        const status = container.find("span.bg-accent").first().text().trim();
+        const update = latestChapter
+          ? `${latestChapter}${status ? ` • ${status}` : ""}`
+          : "";
+
+        if (title && link) {
+          results.push({
+            title,
+            image,
+            detail_link: link,
+            update,
+          });
+        }
+      });
+
+      return {
+        success: true,
+        total: results.length,
+        query: q,
+        data: results,
+      };
     });
 
-    // =============================
-    // 6. RESPONSE
-    // =============================
-    res.json({
-      success: true,
-      total: results.length,
-      query: q,
-      data: results,
-    });
+    setCache(cacheKey, responseData, 60); // 1 menit
+    res.json(responseData);
   } catch (err) {
     console.error("❌ Kiryuu search error:", err.message);
-
-    // fallback biar gak crash frontend
     res.status(200).json({
       success: true,
       total: 0,
@@ -3414,14 +3645,26 @@ app.get("/kiryuu/search", async (req, res) => {
 app.get(
   ["/doujindesu/terbaru", "/doujindesu/pustaka", "/doujindesu/manhwa/terbaru"],
   async (req, res) => {
-  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-  const result = await scrapeDoujindesuTerbaru({ page });
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
 
-  if (!result.success) {
-    return res.status(500).json(result);
-  }
+    const cacheKey = `doujindesu:terbaru:p:${page}`;
+    const cached = getCache(cacheKey);
+    if (cached) {
+      console.log(`⚡ [Cache Hit] ${cacheKey}`);
+      return res.json(cached);
+    }
 
-  res.json(result);
+    try {
+      const result = await coalescedScrape(cacheKey, () => scrapeDoujindesuTerbaru({ page }));
+      if (!result.success) {
+        return res.status(500).json(result);
+      }
+
+      setCache(cacheKey, result, 60); // 1 menit
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
   },
 );
 
@@ -3429,19 +3672,30 @@ app.get(
   ["/sekte/terbaru", "/sekte/pustaka", "/sektedoujin/terbaru", "/sektedoujin/pustaka"],
   async (req, res) => {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const result = await scrapeSekteTerbaru({ page });
 
-    if (!result.success) {
-      return res.status(500).json(result);
+    const cacheKey = `sekte:terbaru:p:${page}`;
+    const cached = getCache(cacheKey);
+    if (cached) {
+      console.log(`⚡ [Cache Hit] ${cacheKey}`);
+      return res.json(cached);
     }
 
-    res.json(result);
+    try {
+      const result = await coalescedScrape(cacheKey, () => scrapeSekteTerbaru({ page }));
+      if (!result.success) {
+        return res.status(500).json(result);
+      }
+
+      setCache(cacheKey, result, 60); // 1 menit
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
   },
 );
 
 app.get(["/sekte/detail/:slug", "/sektedoujin/detail/:slug"], async (req, res) => {
   const { slug } = req.params;
-
   if (!slug) {
     return res.status(400).json({
       success: false,
@@ -3449,17 +3703,29 @@ app.get(["/sekte/detail/:slug", "/sektedoujin/detail/:slug"], async (req, res) =
     });
   }
 
-  const result = await scrapeSekteDetail(slug);
-
-  if (!result.success) {
-    return res.status(500).json(result);
+  const cacheKey = `sekte:detail:${slug}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
   }
 
-  res.json(result);
+  try {
+    const result = await coalescedScrape(cacheKey, () => scrapeSekteDetail(slug));
+    if (!result.success) {
+      return res.status(500).json(result);
+    }
+
+    setCache(cacheKey, result, 900); // 15 menit
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 app.get(["/sekte/search", "/sektedoujin/search"], async (req, res) => {
   const { q, page = 1 } = req.query;
+  const currentPage = Math.max(1, parseInt(page, 10) || 1);
 
   if (!q) {
     return res.status(400).json({
@@ -3468,18 +3734,28 @@ app.get(["/sekte/search", "/sektedoujin/search"], async (req, res) => {
     });
   }
 
-  const result = await scrapeSekteSearch(q, Math.max(1, parseInt(page, 10) || 1));
-
-  if (!result.success) {
-    return res.status(500).json(result);
+  const cacheKey = `sekte:search:${q}:p:${currentPage}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
   }
 
-  res.json(result);
+  try {
+    const result = await coalescedScrape(cacheKey, () => scrapeSekteSearch(q, currentPage));
+    if (!result.success) {
+      return res.status(500).json(result);
+    }
+
+    setCache(cacheKey, result, 60); // 1 menit
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 app.get([/^\/sekte\/chapter\/(.+)/, /^\/sektedoujin\/chapter\/(.+)/], async (req, res) => {
   const slug = req.params[0];
-
   if (!slug) {
     return res.status(400).json({
       success: false,
@@ -3487,18 +3763,28 @@ app.get([/^\/sekte\/chapter\/(.+)/, /^\/sektedoujin\/chapter\/(.+)/], async (req
     });
   }
 
-  const result = await scrapeSekteChapter(slug);
-
-  if (!result.success) {
-    return res.status(500).json(result);
+  const cacheKey = `sekte:chapter:${slug}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
   }
 
-  res.json(result);
+  try {
+    const result = await coalescedScrape(cacheKey, () => scrapeSekteChapter(slug));
+    if (!result.success) {
+      return res.status(500).json(result);
+    }
+
+    setCache(cacheKey, result, 7200); // 2 jam
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 app.get("/doujindesu/detail/:slug", async (req, res) => {
   const { slug } = req.params;
-
   if (!slug) {
     return res.status(400).json({
       success: false,
@@ -3506,17 +3792,29 @@ app.get("/doujindesu/detail/:slug", async (req, res) => {
     });
   }
 
-  const result = await scrapeDoujindesuDetail(slug);
-
-  if (!result.success) {
-    return res.status(500).json(result);
+  const cacheKey = `doujindesu:detail:${slug}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
   }
 
-  res.json(result);
+  try {
+    const result = await coalescedScrape(cacheKey, () => scrapeDoujindesuDetail(slug));
+    if (!result.success) {
+      return res.status(500).json(result);
+    }
+
+    setCache(cacheKey, result, 900); // 15 menit
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 app.get("/doujindesu/search", async (req, res) => {
   const { q, page = 1 } = req.query;
+  const currentPage = Math.max(1, parseInt(page, 10) || 1);
 
   if (!q) {
     return res.status(400).json({
@@ -3525,18 +3823,28 @@ app.get("/doujindesu/search", async (req, res) => {
     });
   }
 
-  const result = await scrapeDoujindesuSearch(q, Math.max(1, parseInt(page, 10) || 1));
-
-  if (!result.success) {
-    return res.status(500).json(result);
+  const cacheKey = `doujindesu:search:${q}:p:${currentPage}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
   }
 
-  res.json(result);
+  try {
+    const result = await coalescedScrape(cacheKey, () => scrapeDoujindesuSearch(q, currentPage));
+    if (!result.success) {
+      return res.status(500).json(result);
+    }
+
+    setCache(cacheKey, result, 60); // 1 menit
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 app.get(/^\/doujindesu\/chapter\/(.+)/, async (req, res) => {
   const slug = req.params[0];
-
   if (!slug) {
     return res.status(400).json({
       success: false,
@@ -3544,13 +3852,24 @@ app.get(/^\/doujindesu\/chapter\/(.+)/, async (req, res) => {
     });
   }
 
-  const result = await scrapeDoujindesuChapter(slug);
-
-  if (!result.success) {
-    return res.status(500).json(result);
+  const cacheKey = `doujindesu:chapter:${slug}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
   }
 
-  res.json(result);
+  try {
+    const result = await coalescedScrape(cacheKey, () => scrapeDoujindesuChapter(slug));
+    if (!result.success) {
+      return res.status(500).json(result);
+    }
+
+    setCache(cacheKey, result, 7200); // 2 jam
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 
@@ -3570,12 +3889,23 @@ async function mgkomikFetch(url) {
 
 // ================= ROUTE =================
 app.get(/^\/mangaku\/chapter\/(.+)/, async (req, res) => {
+  const slug = req.params[0];
+  const cacheKey = `mangaku:chapter:${slug}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
+  }
+
   try {
-    const slug = req.params[0];
-    const fullUrl = `https://mangaku.onl/${slug}/`;
+    const result = await coalescedScrape(cacheKey, () => {
+      const fullUrl = `https://mangaku.onl/${slug}/`;
+      return scrapeMangakuChapter(fullUrl);
+    });
 
-    const result = await scrapeMangakuChapter(fullUrl);
-
+    if (result && result.success) {
+      setCache(cacheKey, result, 7200); // 2 jam
+    }
     res.json(result);
   } catch (err) {
     res.json({
@@ -3585,51 +3915,67 @@ app.get(/^\/mangaku\/chapter\/(.+)/, async (req, res) => {
   }
 });
 
-
-
-
-
-
-
-// ================= ENDPOINT =================
-
 app.get("/mangaku/pustaka", async (req, res) => {
   const page = parseInt(req.query.page) || 1;
-  const result = await scrapeMangakuPustaka({ page });
 
-  if (!result.data.length) {
-    return res.json({
-      success: true,
-      page,
-      total: 0,
-      data: [],
-      warning: "Data kosong / Site limit",
-    });
+  const cacheKey = `mangaku:pustaka:p:${page}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
   }
 
-  res.json(result);
+  try {
+    const responseData = await coalescedScrape(cacheKey, async () => {
+      const result = await scrapeMangakuPustaka({ page });
+      if (!result.data.length) {
+        return {
+          success: true,
+          page,
+          total: 0,
+          data: [],
+          warning: "Data kosong / Site limit",
+        };
+      }
+      return result;
+    });
+
+    setCache(cacheKey, responseData, 60); // 1 menit
+    res.json(responseData);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 
 app.get("/mangaku/detail/:slug", async (req, res) => {
+  const { slug } = req.params;
+  if (!slug) {
+    return res.status(400).json({
+      success: false,
+      message: "Slug tidak diberikan!",
+    });
+  }
+
+  const cacheKey = `mangaku:detail:${slug}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
+  }
+
   try {
-    const { slug } = req.params;
+    const result = await coalescedScrape(cacheKey, () => {
+      const fullUrl = `https://mangaku.onl/komik/${slug}/`;
+      return scrapeMangakuDetail(fullUrl);
+    });
 
-    if (!slug) {
-      return res.status(400).json({
-        success: false,
-        message: "Slug tidak diberikan!",
-      });
+    if (result && result.success) {
+      setCache(cacheKey, result, 900); // 15 menit
     }
-
-    const fullUrl = `https://mangaku.onl/komik/${slug}/`;
-
-    const result = await scrapeMangakuDetail(fullUrl);
-
     res.json(result);
   } catch (err) {
     console.error("Route error:", err.message);
-
     res.status(500).json({
       success: false,
       message: "Terjadi kesalahan pada server",
@@ -3639,6 +3985,7 @@ app.get("/mangaku/detail/:slug", async (req, res) => {
 
 app.get("/mangaku/search", async (req, res) => {
   const { q, page = 1 } = req.query;
+  const currentPage = Number(page);
 
   if (!q) {
     return res
@@ -3646,57 +3993,65 @@ app.get("/mangaku/search", async (req, res) => {
       .json({ success: false, message: "Masukkan parameter ?q=" });
   }
 
+  const cacheKey = `mangaku:search:${q}:p:${currentPage}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
+  }
+
   try {
-    const url =
-      page == 1
-        ? `https://mangaku.onl/?s=${encodeURIComponent(q)}`
-        : `https://mangaku.onl/page/${page}/?s=${encodeURIComponent(q)}`;
+    const responseData = await coalescedScrape(cacheKey, async () => {
+      const url =
+        currentPage === 1
+          ? `https://mangaku.onl/?s=${encodeURIComponent(q)}`
+          : `https://mangaku.onl/page/${currentPage}/?s=${encodeURIComponent(q)}`;
 
-    const { data } = await axios.get(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-      },
-      timeout: 10000,
-    });
-
-    const $ = cheerio.load(data);
-    const results = [];
-
-    $(".listupd .bs").each((_, el) => {
-      const anchor = $(el).find("a");
-
-      const title = anchor.attr("title")?.trim() || "";
-      const link = anchor.attr("href") || "";
-
-      let image = $(el).find("img").attr("src") || "";
-      if (image.startsWith("//")) image = "https:" + image;
-
-      // 🔥 bersihin CDN wp.com kalau mau
-      image = image.replace(/^https:\/\/i\d\.wp\.com\//, "https://");
-
-      const chapter = $(el).find(".epxs").text().trim() || "";
-
-      const slug = link
-        .replace("https://mangaku.onl/komik/", "")
-        .replace(/\/$/, "");
-
-      results.push({
-        title,
-        image,
-        detail_link: link,
-        update: chapter, // 🔥 samain nama dengan komiku
-        slug: `mangaku-${slug}`, // 🔥 penting buat sistem kamu
-        source: "mangaku",
+      const { data } = await axios.get(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0",
+        },
+        timeout: 10000,
       });
+
+      const $ = cheerio.load(data);
+      const results = [];
+
+      $(".listupd .bs").each((_, el) => {
+        const anchor = $(el).find("a");
+        const title = anchor.attr("title")?.trim() || "";
+        const link = anchor.attr("href") || "";
+
+        let image = $(el).find("img").attr("src") || "";
+        if (image.startsWith("//")) image = "https:" + image;
+        image = image.replace(/^https:\/\/i\d\.wp\.com\//, "https://");
+
+        const chapter = $(el).find(".epxs").text().trim() || "";
+        const currentSlug = link
+          .replace("https://mangaku.onl/komik/", "")
+          .replace(/\/$/, "");
+
+        results.push({
+          title,
+          image,
+          detail_link: link,
+          update: chapter,
+          slug: `mangaku-${currentSlug}`,
+          source: "mangaku",
+        });
+      });
+
+      return {
+        success: true,
+        total: results.length,
+        query: q,
+        page: currentPage,
+        data: results,
+      };
     });
 
-    res.json({
-      success: true,
-      total: results.length,
-      query: q,
-      page: Number(page),
-      data: results,
-    });
+    setCache(cacheKey, responseData, 60); // 1 menit
+    res.json(responseData);
   } catch (err) {
     console.error(err.message);
     res.status(500).json({
@@ -3708,18 +4063,29 @@ app.get("/mangaku/search", async (req, res) => {
 
 
 app.get(/^\/meionovels\/chapter\/(.*)/, async (req, res) => {
+  const slug = req.params[0];
+  const cacheKey = `meionovels:chapter:${slug}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
+  }
+
   try {
-    const slug = req.params[0];
-
-    const fullUrl = `https://meionovels.com/novel/${slug}`;
-
-    const result = await scrapeMeioChapter(fullUrl);
-    const series = slug.split("/")[0];
-
-    res.json({
-      ...result,
-      series, // ← ini yang kamu mau
+    const result = await coalescedScrape(cacheKey, async () => {
+      const fullUrl = `https://meionovels.com/novel/${slug}`;
+      const chapter = await scrapeMeioChapter(fullUrl);
+      const series = slug.split("/")[0];
+      return {
+        ...chapter,
+        series,
+      };
     });
+
+    if (result && result.success) {
+      setCache(cacheKey, result, 7200); // 2 jam
+    }
+    res.json(result);
   } catch (err) {
     res.status(500).json({
       success: false,
@@ -3731,17 +4097,28 @@ app.get(/^\/meionovels\/chapter\/(.*)/, async (req, res) => {
 // ================= ENDPOINT =================
 
 app.get("/meionovels/pustaka", async (req, res) => {
+  const page = Number(req.query.page) || 1;
+
+  const cacheKey = `meionovels:pustaka:p:${page}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
+  }
+
   try {
-    const page = Number(req.query.page) || 1;
-
-    const data = await scrapeMeionovelsList(page);
-
-    res.json({
-      success: true,
-      page,
-      total: data.length,
-      data,
+    const responseData = await coalescedScrape(cacheKey, async () => {
+      const data = await scrapeMeionovelsList(page);
+      return {
+        success: true,
+        page,
+        total: data.length,
+        data,
+      };
     });
+
+    setCache(cacheKey, responseData, 60); // 1 menit
+    res.json(responseData);
   } catch (err) {
     res.json({
       success: false,
@@ -3751,24 +4128,33 @@ app.get("/meionovels/pustaka", async (req, res) => {
 });
 
 app.get("/meionovels/detail/:slug", async (req, res) => {
+  const { slug } = req.params;
+  if (!slug) {
+    return res.status(400).json({
+      success: false,
+      message: "Slug tidak diberikan!",
+    });
+  }
+
+  const cacheKey = `meionovels:detail:${slug}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
+  }
+
   try {
-    const { slug } = req.params;
+    const result = await coalescedScrape(cacheKey, () => {
+      const fullUrl = `https://meionovels.com/novel/${slug}/`;
+      return scrapeMeionovelsDetail(fullUrl);
+    });
 
-    if (!slug) {
-      return res.status(400).json({
-        success: false,
-        message: "Slug tidak diberikan!",
-      });
+    if (result && result.success) {
+      setCache(cacheKey, result, 900); // 15 menit
     }
-
-    const fullUrl = `https://meionovels.com/novel/${slug}/`;
-
-    const result = await scrapeMeionovelsDetail(fullUrl);
-
     res.json(result);
   } catch (err) {
     console.error("Route error:", err.message);
-
     res.status(500).json({
       success: false,
       message: "Terjadi kesalahan pada server",
