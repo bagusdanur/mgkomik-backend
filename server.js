@@ -6,7 +6,7 @@ const cors = require("cors");
 const app = express();
 const PORT = process.env.PORT || 3013;
 const SEKTE_BASE_URL = "https://sektedoujin.cc";
-const SEKTE_PROXY_URL = "https://sekte.ezcantik9.workers.dev?url=";
+const SEKTE_PROXY_URL = "https://proxy.kopipaitboskuh.workers.dev/?url=";
 
 app.use(cors({ origin: "*" }));
 

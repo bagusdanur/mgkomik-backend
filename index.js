@@ -96,14 +96,13 @@ async function coalescedScrape(urlKey, scrapeFn) {
 }
 
 
-const KOMIKU_IMAGE_WORKER = "https://cdnkm.konatanime17.workers.dev/";
 const KIRYUU_BASE_URL = "https://v6.kiryuu.to";
 const KIRYUU_PROXY_URL =
-  process.env.KIRYUU_PROXY_URL || "https://sekte.ezcantik9.workers.dev?url=";
+  process.env.KIRYUU_PROXY_URL || "https://proxy.kopipaitboskuh.workers.dev/?url=";
 
-function toKomikuWorkerImageUrl(imageUrl) {
+function toKomikuWorkerImageUrl(imageUrl, req) {
   if (!imageUrl) return "";
-  return `${KOMIKU_IMAGE_WORKER}?url=${encodeURIComponent(imageUrl)}`;
+  return `${getRequestBaseUrl(req)}/komiku/image?url=${encodeURIComponent(imageUrl)}`;
 }
 
 function kiryuuHeaders(referer = `${KIRYUU_BASE_URL}/`) {
@@ -1398,7 +1397,7 @@ const typeGenre = typeClass
 }
 
 const DOUJINDESU_BASE_URL = "https://doujindesu.tv";
-const DOUJINDESU_PROXY_URL = "https://sekte.ezcantik9.workers.dev?url=";
+const DOUJINDESU_PROXY_URL = "https://proxy.kopipaitboskuh.workers.dev/?url=";
 const DOUJINDESU_CF_IP = "104.26.8.62";
 const DOUJINDESU_IMAGE_PROBE_BATCH_SIZE = 16;
 const DOUJINDESU_IMAGE_CACHE_TTL = 1000 * 60 * 30;
@@ -1680,7 +1679,7 @@ async function probeDoujindesuChapterImages(seriesTitle, chapterTitle) {
 }
 
 const SEKTE_BASE_URL = "https://sektedoujin.cc";
-const SEKTE_PROXY_URL = "https://sekte.ezcantik9.workers.dev?url=";
+const SEKTE_PROXY_URL = "https://proxy.kopipaitboskuh.workers.dev/?url=";
 
 function sekteUrl(path = "/") {
   if (!path) return "";
@@ -3120,7 +3119,7 @@ app.get("/komiku/chapter/:slug", async (req, res) => {
       if (resData?.success && Array.isArray(resData.images)) {
         resData.images = resData.images
           .filter(Boolean)
-          .map((imageUrl) => toKomikuWorkerImageUrl(imageUrl));
+          .map((imageUrl) => toKomikuWorkerImageUrl(imageUrl, req));
       }
       return resData;
     });
@@ -3450,6 +3449,69 @@ app.get("/kiryuu/image", async (req, res) => {
   } catch (err) {
     console.error("Kiryuu image proxy error:", err.message);
     res.status(502).send("Gagal mengambil gambar Kiryuu");
+  }
+});
+
+const ALLOWED_KOMIKU_HOSTS = new Set([
+  "komiku.org",
+  "www.komiku.org",
+  "cdn.komiku.org",
+]);
+
+function isAllowedKomikuImageUrl(url) {
+  try {
+    const parsed = new URL(url);
+
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return false;
+    }
+
+    if (ALLOWED_KOMIKU_HOSTS.has(parsed.hostname)) {
+      return true;
+    }
+
+    return parsed.hostname.endsWith(".komiku.org");
+  } catch {
+    return false;
+  }
+}
+
+app.get("/komiku/image", async (req, res) => {
+  try {
+    const imageUrl = req.query.url || "";
+
+    if (!imageUrl) {
+      return res.status(400).send("Missing url");
+    }
+
+    if (!isAllowedKomikuImageUrl(imageUrl)) {
+      return res.status(403).send("Image host not allowed");
+    }
+
+    const response = await axios.get(imageUrl, {
+      responseType: "stream",
+      timeout: 30000,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
+        Referer: "https://komiku.org/",
+      },
+    });
+
+    const contentType = response.headers["content-type"] || "image/jpeg";
+
+    if (!contentType.startsWith("image/")) {
+      return res.status(415).send("Upstream is not an image");
+    }
+
+    res.set("Content-Type", contentType);
+    res.set("Cache-Control", "public, max-age=604800, s-maxage=604800");
+    response.data.pipe(res);
+  } catch (err) {
+    console.error("Komiku image proxy error:", err.message);
+    res.status(502).send("Gagal mengambil gambar Komiku");
   }
 });
 
