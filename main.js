@@ -1522,11 +1522,15 @@ app.get("/animeid/episode/:slug", async (req, res) => {
   // Clone and rewrite players to use the video-proxy locally (ONLY for kotakanimeid.link)
   if (result.success && result.data && Array.isArray(result.data.players)) {
     const modifiedResult = JSON.parse(JSON.stringify(result));
+    let ryuLokalCount = 0;
     modifiedResult.data.players = modifiedResult.data.players.map((p) => {
       if (p.iframe && p.iframe.includes("kotakanimeid.link")) {
+        ryuLokalCount++;
         return {
           ...p,
+          name: `Ryu-Lokal ${ryuLokalCount}`,
           iframe: `${getRequestBaseUrl(req)}/animeid/video-proxy?url=${encodeURIComponent(p.iframe)}`,
+          streamUrl: `${getRequestBaseUrl(req)}/animeid/resolve-stream?url=${encodeURIComponent(p.iframe)}`,
         };
       }
       return p;
@@ -1535,6 +1539,51 @@ app.get("/animeid/episode/:slug", async (req, res) => {
   }
 
   res.json(result);
+});
+
+app.get("/animeid/resolve-stream", async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).send("url required");
+
+  try {
+    const response = await axios.get(url, {
+      timeout: 20000,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        Referer: "https://s13.nontonanimeid.boats/",
+      },
+    });
+
+    const html = response.data;
+
+    // Decrypt and route stream URL through our proxy (error 202000 / 403)
+    const encryptRegex = /var\s+([a-zA-Z0-9_$]+)\s*=\s*\[([\d,\s]+)\];\s*(?:var\s+)?([a-zA-Z0-9_$]+)\s*=\s*atob\("([^"]+)"\);/;
+    const match = html.match(encryptRegex);
+    if (match) {
+      const keys = match[2].split(",").map(Number);
+      const base64Data = match[4];
+      const encryptedBytes = Buffer.from(base64Data, "base64");
+      let decryptedJs = "";
+      for (let i = 0; i < encryptedBytes.length; i++) {
+        decryptedJs += String.fromCharCode(encryptedBytes[i] ^ keys[i % keys.length]);
+      }
+
+      const fileMatch = decryptedJs.match(/"file"\s*:\s*"([^"]+)"/);
+      if (fileMatch) {
+        const rawUrl = fileMatch[1];
+        const streamUrl = rawUrl.replace(/\\/g, ""); // Strip backslashes if present
+        const cleanCdnUrl = streamUrl.replace(/^https?:\/\//, "");
+        const proxiedStreamUrl = `${getRequestBaseUrl(req)}/animeid/stream-proxy/${cleanCdnUrl}`;
+        return res.redirect(proxiedStreamUrl);
+      }
+    }
+
+    res.status(404).send("Stream URL not found in player page");
+  } catch (err) {
+    console.error("Resolve stream error:", err.message);
+    res.status(502).send("Gagal mengurai stream video");
+  }
 });
 
 app.get("/animeid/video-proxy", async (req, res) => {
@@ -1556,7 +1605,10 @@ app.get("/animeid/video-proxy", async (req, res) => {
     // Bypass frame-busting/embed domain alert check
     html = html.replace(/function\s+showAlert\s*\(\)\s*\{/g, "function showAlert() { return;");
 
-    // Decrypt and resolve direct stream URL to avoid CORS/Origin blocks (error 202000 / 403)
+    // Strip CSP meta tag that forces upgrade to HTTPS on localhost
+    html = html.replace(/<meta http-equiv=["']Content-Security-Policy["'] content=["']upgrade-insecure-requests["']\s*\/?>/gi, "");
+
+    // Decrypt and route stream URL through our proxy (error 202000 / 403)
     const encryptRegex = /var\s+([a-zA-Z0-9_$]+)\s*=\s*\[([\d,\s]+)\];\s*(?:var\s+)?([a-zA-Z0-9_$]+)\s*=\s*atob\("([^"]+)"\);/;
     const match = html.match(encryptRegex);
     if (match) {
@@ -1569,36 +1621,21 @@ app.get("/animeid/video-proxy", async (req, res) => {
           decryptedJs += String.fromCharCode(encryptedBytes[i] ^ keys[i % keys.length]);
         }
 
-        // Extract the stream URL (e.g. https://s1.kotakanimeid.link/go/dl/?url=...)
+        // Extract the stream URL (e.g. https://s1.kotakanimeid.link/go/dl/?url=... or googlevideo.com)
         const fileMatch = decryptedJs.match(/"file"\s*:\s*"([^"]+)"/);
         if (fileMatch) {
-          const streamUrl = fileMatch[1];
-          
-          // Resolve the redirect on the backend (sends referer)
-          const redirectRes = await axios.get(streamUrl, {
-            maxRedirects: 0,
-            validateStatus: (status) => status >= 200 && status < 400,
-            headers: {
-              "User-Agent":
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-              Referer: "https://s13.nontonanimeid.boats/",
-            },
-          });
-
-          const directCdnUrl = redirectRes.headers.location;
-          if (directCdnUrl) {
-            // Re-route the stream through our backend proxy to strip the browser's blocked Origin header
-            const cleanCdnUrl = directCdnUrl.replace(/^https?:\/\//, "");
-            const proxiedStreamUrl = `${getRequestBaseUrl(req)}/animeid/stream-proxy/${cleanCdnUrl}`;
-            decryptedJs = decryptedJs.replace(streamUrl, proxiedStreamUrl);
-          }
+          const rawUrl = fileMatch[1];
+          const streamUrl = rawUrl.replace(/\\/g, ""); // Strip backslashes if present
+          const cleanCdnUrl = streamUrl.replace(/^https?:\/\//, "");
+          const proxiedStreamUrl = `${getRequestBaseUrl(req)}/animeid/stream-proxy/${cleanCdnUrl}`;
+          decryptedJs = decryptedJs.replace(rawUrl, proxiedStreamUrl);
         }
 
         // Replace the entire anonymous function script tag with the decrypted and modified JS
         const scriptBlockRegex = /<script>\(function\(\)\{[\s\S]+?<\/script>/;
         html = html.replace(scriptBlockRegex, `<script>\n${decryptedJs}\n</script>`);
       } catch (decryptErr) {
-        console.error("Gagal mendecrypt atau meresolve stream URL:", decryptErr.message);
+        console.error("Gagal mendecrypt player script:", decryptErr.message);
       }
     }
 
@@ -1611,6 +1648,7 @@ app.get("/animeid/video-proxy", async (req, res) => {
       html = `<base href="${origin}">` + html;
     }
 
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate, private");
     res.set("Content-Type", "text/html; charset=UTF-8");
     res.send(html);
   } catch (err) {
@@ -1644,8 +1682,20 @@ app.get(/^\/animeid\/stream-proxy\/(.+)/, async (req, res) => {
       url: targetUrl,
       responseType: "stream",
       headers,
+      maxRedirects: 0,
+      validateStatus: (status) => status >= 200 && status < 400,
       timeout: 30000,
     });
+
+    // Handle 302/301 redirects by rewriting the location header to our stream proxy
+    if (response.status === 301 || response.status === 302) {
+      const redirectUrl = response.headers.location;
+      if (redirectUrl) {
+        const cleanRedirectUrl = redirectUrl.replace(/^https?:\/\//, "");
+        const proxiedRedirectUrl = `${getRequestBaseUrl(req)}/animeid/stream-proxy/${cleanRedirectUrl}`;
+        return res.redirect(proxiedRedirectUrl);
+      }
+    }
 
     // Copy stream headers from source
     if (response.headers["content-type"]) {
@@ -1665,6 +1715,9 @@ app.get(/^\/animeid\/stream-proxy\/(.+)/, async (req, res) => {
     res.set("Access-Control-Allow-Origin", "*");
     res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
     res.set("Access-Control-Allow-Headers", "*");
+
+    // Forward the exact HTTP response status code (e.g. 206 Partial Content for Range requests)
+    res.status(response.status);
 
     response.data.pipe(res);
   } catch (err) {
