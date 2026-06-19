@@ -1872,6 +1872,226 @@ app.get("/neko/image", async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// STREAMPOI RESOLVER — Extract direct m3u8 from streampoi.com embed pages
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Dean Edwards Packer unpacker
+ * Reverses the obfuscation used by streampoi.com embed pages
+ */
+function unpackDeanEdwards(p, a, c, k) {
+  while (c--) {
+    if (k[c]) {
+      p = p.replace(new RegExp('\\b' + c.toString(a) + '\\b', 'g'), k[c]);
+    }
+  }
+  return p;
+}
+
+/**
+ * Parse and unpack a Dean Edwards packed script from HTML
+ * Returns the unpacked JS string or null if not found
+ */
+function extractPackedScript(html) {
+  // Match: eval(function(p,a,c,k,e,d){...}('packed_string',base,count,'keywords'.split('|')))
+  const packedRegex = /eval\(function\(p,a,c,k,e,d\)\{[^}]+\}\('((?:[^'\\]|\\.)*)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'((?:[^'\\]|\\.)*)'\.split\('\|'\)\s*(?:,\s*\d+\s*,\s*\{[^}]*\})?\)\)/;
+  const match = html.match(packedRegex);
+  if (!match) return null;
+
+  const p = match[1];
+  const a = parseInt(match[2]);
+  const c = parseInt(match[3]);
+  const k = match[4].split('|');
+
+  return unpackDeanEdwards(p, a, c, k);
+}
+
+/**
+ * Extract m3u8 URL and metadata from unpacked JWPlayer setup script
+ */
+function extractStreamInfo(unpackedJs) {
+  if (!unpackedJs) return null;
+
+  // Extract file (m3u8) URL
+  const fileMatch = unpackedJs.match(/file\s*:\s*"([^"]+\.m3u8[^"]*)"/);
+  if (!fileMatch) return null;
+
+  const m3u8Url = fileMatch[1];
+
+  // Extract thumbnail/image
+  const imageMatch = unpackedJs.match(/image\s*:\s*"([^"]+)"/);
+  const image = imageMatch ? imageMatch[1] : "";
+
+  // Extract duration
+  const durationMatch = unpackedJs.match(/duration\s*:\s*"([^"]+)"/);
+  const duration = durationMatch ? durationMatch[1] : "";
+
+  // Extract quality labels
+  const qualityLabels = {};
+  const qlMatch = unpackedJs.match(/'qualityLabels'\s*:\s*\{([^}]+)\}/);
+  if (qlMatch) {
+    const pairs = qlMatch[1].matchAll(/"(\d+)"\s*:\s*"([^"]+)"/g);
+    for (const pair of pairs) {
+      qualityLabels[pair[1]] = pair[2];
+    }
+  }
+
+  // Extract VTT thumbnail track
+  const vttMatch = unpackedJs.match(/file\s*:\s*"([^"]+\.vtt[^"]*)"/);
+  const vttUrl = vttMatch ? vttMatch[1] : "";
+
+  return {
+    m3u8: m3u8Url,
+    image,
+    duration,
+    qualityLabels,
+    vtt: vttUrl,
+  };
+}
+
+/**
+ * Resolve a streampoi.com embed URL to direct m3u8 stream info
+ * @param {string} embedUrl - e.g. "https://streampoi.com/embed-xxxxx.html"
+ * @returns {Promise<object|null>}
+ */
+async function resolveStreampoi(embedUrl) {
+  try {
+    const response = await axios.get(embedUrl, {
+      headers: {
+        "User-Agent": randomUA(),
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
+        Referer: "https://nekopoi.care/",
+      },
+      timeout: 15000,
+    });
+
+    const html = typeof response.data === "string" ? response.data : "";
+    if (!html) return null;
+
+    const unpackedJs = extractPackedScript(html);
+    if (!unpackedJs) {
+      console.warn("[Streampoi] Packed script tidak ditemukan di:", embedUrl);
+      return null;
+    }
+
+    const streamInfo = extractStreamInfo(unpackedJs);
+    if (!streamInfo) {
+      console.warn("[Streampoi] m3u8 URL tidak ditemukan di unpacked script:", embedUrl);
+      return null;
+    }
+
+    return streamInfo;
+  } catch (err) {
+    console.error("[Streampoi] Resolve error:", err.message);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STREAMPOI ROUTES
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /nekopoi/resolve-streampoi?url=https://streampoi.com/embed-xxx.html
+ * Returns the direct m3u8 URL and stream metadata
+ */
+app.get("/nekopoi/resolve-streampoi", async (req, res) => {
+  const { url } = req.query;
+  if (!url || !url.includes("streampoi.com")) {
+    return res.status(400).json({
+      success: false,
+      message: "Parameter 'url' harus berupa URL streampoi.com yang valid",
+    });
+  }
+
+  const cacheKey = `streampoi_resolve_${url}`;
+  const cached = getCache(cacheKey);
+  if (cached) return res.json(cached);
+
+  const streamInfo = await resolveStreampoi(url);
+  if (!streamInfo) {
+    return res.status(502).json({
+      success: false,
+      message: "Gagal mengekstrak stream dari streampoi",
+    });
+  }
+
+  // Rewrite m3u8 URL to go through our proxy (to handle CORS)
+  const baseUrl = getRequestBaseUrl(req);
+  const proxiedM3u8 = `${baseUrl}/nekopoi/stream-proxy/${encodeURIComponent(streamInfo.m3u8)}`;
+
+  const result = {
+    success: true,
+    data: {
+      m3u8: streamInfo.m3u8,
+      m3u8_proxy: proxiedM3u8,
+      image: streamInfo.image,
+      duration: streamInfo.duration,
+      qualityLabels: streamInfo.qualityLabels,
+      vtt: streamInfo.vtt,
+    },
+  };
+
+  // Cache 4 jam (token biasanya valid ~9 jam berdasarkan parameter 'e' di URL)
+  setCache(cacheKey, result, 4 * 60 * 60);
+  res.json(result);
+});
+
+/**
+ * GET /nekopoi/stream-proxy/:encodedUrl
+ * Proxies m3u8 playlists and rewrites internal URLs so the frontend player
+ * can fetch sub-playlists and .ts segments through this same proxy.
+ */
+app.get("/nekopoi/stream-proxy/:encodedUrl", async (req, res) => {
+  const encodedUrl = req.params.encodedUrl;
+  if (!encodedUrl) return res.status(400).send("URL required");
+
+  const targetUrl = decodeURIComponent(encodedUrl);
+
+  try {
+    const response = await axios.get(targetUrl, {
+      headers: {
+        "User-Agent": randomUA(),
+        Referer: "https://streampoi.com/",
+      },
+      timeout: 15000,
+      // responseType depends on content — m3u8 is text, .ts is binary
+      responseType: targetUrl.includes(".m3u8") ? "text" : "arraybuffer",
+    });
+
+    const baseUrl = getRequestBaseUrl(req);
+
+    if (targetUrl.includes(".m3u8")) {
+      // Rewrite internal URLs in the playlist to go through our proxy
+      let playlist = response.data;
+
+      // Replace absolute URLs (https://...)
+      playlist = playlist.replace(/(https?:\/\/[^\s]+)/g, (match) => {
+        return `${baseUrl}/nekopoi/stream-proxy/${encodeURIComponent(match)}`;
+      });
+
+      res.set("Content-Type", "application/vnd.apple.mpegurl");
+      res.set("Access-Control-Allow-Origin", "*");
+      res.set("Cache-Control", "no-cache");
+      res.send(playlist);
+    } else {
+      // Binary content (.ts segments, .key files, etc.)
+      res.set("Content-Type", response.headers["content-type"] || "video/mp2t");
+      if (response.headers["content-length"]) {
+        res.set("Content-Length", response.headers["content-length"]);
+      }
+      res.set("Access-Control-Allow-Origin", "*");
+      res.set("Cache-Control", "public, max-age=86400");
+      res.send(Buffer.from(response.data));
+    }
+  } catch (err) {
+    console.error("[Streampoi Proxy] Error:", targetUrl, err.message);
+    res.status(502).send("Gagal mengambil stream");
+  }
+});
+
 app.listen(3014, "0.0.0.0", () => {
   console.log("🚀 Server jalan di http://localhost:3014");
-});
+});
