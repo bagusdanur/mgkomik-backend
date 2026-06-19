@@ -1335,6 +1335,104 @@ async function scrapeAnichinSeri(slug) {
     return { success: false, message: "Gagal scrape anichin seri: " + err.message };
   }
 }
+
+async function scrapeAnichinSearch(query, page = 1) {
+  try {
+    const encodedQuery = encodeURIComponent(query);
+    const url = page <= 1
+      ? `${ANICHIN_BASE_URL}/?s=${encodedQuery}`
+      : `${ANICHIN_BASE_URL}/page/${page}/?s=${encodedQuery}`;
+
+    const res = await fetchAnichin(url);
+    const $ = cheerio.load(res.data);
+    const items = [];
+
+    $(".listupd article.bs, .bixbox article.bs").each((i, el) => {
+      const anchor = $(el).find(".bsx > a");
+      const href = anchor.attr("href") || "";
+      const slug = href.replace(/\/$/, "").split("/").filter(Boolean).pop() || "";
+
+      const thumbnail =
+        anchor.find("img").attr("src") ||
+        anchor.find("img").attr("data-src") ||
+        "";
+
+      // Title parsing
+      const title = $(el)
+        .find(".bsx .tt")
+        .clone()
+        .children("h2")
+        .remove()
+        .end()
+        .text()
+        .trim() || anchor.attr("title") || $(el).find(".bsx .tt h2").text().trim();
+
+      const episodeTitle = $(el).find("h2[itemprop='headline']").text().trim() || title;
+
+      const type = anchor.find(".typez").text().trim();
+
+      // Label episode/status
+      const episodeLabel = anchor.find(".bt .epx").text().trim();
+      const epMatch = episodeLabel.match(/(\d+)/);
+      const episode = epMatch ? parseInt(epMatch[1]) : null;
+      const isEnd = /end/i.test(episodeLabel);
+      const isMovie = /movie/i.test(type);
+
+      const subDub = anchor.find(".bt .sb").text().trim();
+
+      const statusBadge = anchor.find(".limit .status").text().trim();
+      const status = statusBadge || (episodeLabel === "Completed" || episodeLabel === "Ongoing" ? episodeLabel : "Ongoing");
+
+      items.push({
+        title,
+        episodeTitle,
+        slug,
+        url: href,
+        thumbnail,
+        type,
+        episode,
+        episodeLabel,
+        isEnd,
+        isMovie,
+        subDub,
+        status,
+      });
+    });
+
+    // Pagination
+    const paginationEl = $(".pagination");
+    const currentPage = parseInt(paginationEl.find(".page-numbers.current").text().trim()) || page;
+    const lastPageEl = paginationEl.find(".page-numbers:not(.next):not(.prev):not(.dots)").last();
+    const totalPages = Math.max(parseInt(lastPageEl.text().trim()) || currentPage || 1, currentPage || 1);
+    
+    const hasNext = paginationEl.find("a.next.page-numbers").length > 0;
+    const hasPrev = paginationEl.find("a.prev.page-numbers").length > 0 || currentPage > 1;
+
+    return {
+      success: true,
+      query,
+      page: currentPage,
+      totalPages,
+      totalResults: items.length,
+      hasNext,
+      hasPrev,
+      nextPage: hasNext ? currentPage + 1 : null,
+      prevPage: hasPrev ? currentPage - 1 : null,
+      pagination: {
+        currentPage,
+        totalPages,
+        hasNext,
+        hasPrev,
+        nextPage: hasNext ? currentPage + 1 : null,
+        prevPage: hasPrev ? currentPage - 1 : null,
+      },
+      total: items.length,
+      data: items,
+    };
+  } catch (err) {
+    return { success: false, message: "Gagal scrape search anichin: " + err.message };
+  }
+}
  
 app.get("/anichin/detail/:slug", async (req, res) => {
   const { slug } = req.params;
@@ -1393,6 +1491,19 @@ app.get("/anichin/terbaru", async (req, res) => {
  
   if (result.success) setCache(cacheKey, result, page === 1 ? 120 : 300);
  
+  res.json(result);
+});
+
+app.get("/anichin/search", async (req, res) => {
+  const { q, page } = req.query;
+  if (!q || q.trim().length < 2)
+    return res.status(400).json({ success: false, message: "Parameter 'q' minimal 2 karakter" });
+  const pageNum = parseInt(page) || 1;
+  const cacheKey = `anichin_search_${q.toLowerCase().replace(/\s+/g, "_")}_p${pageNum}`;
+  const cached = getCache(cacheKey);
+  if (cached) return res.json(cached);
+  const result = await scrapeAnichinSearch(q, pageNum);
+  if (result.success && result.total > 0) setCache(cacheKey, result, 300);
   res.json(result);
 });
  
