@@ -33,9 +33,10 @@ const keepAliveAgentHttps = new https.Agent({
   timeout: 60000,
 });
 
-// Konfigurasi Axios default menggunakan Keep-Alive Agent
+// Konfigurasi Axios default menggunakan Keep-Alive Agent & Default Timeout
 axios.defaults.httpAgent = keepAliveAgentHttp;
 axios.defaults.httpsAgent = keepAliveAgentHttps;
+axios.defaults.timeout = 15000; // Timeout default 15 detik untuk menghindari request gantung
 
 // Map cache dalam memori
 const globalMemoryCache = new Map();
@@ -57,6 +58,12 @@ function setCache(key, data, ttlInSeconds) {
     data,
     expiry: Date.now() + ttlInSeconds * 1000,
   });
+
+  // Mencegah memory leak dengan membatasi ukuran cache memori maksimal 500 item
+  if (globalMemoryCache.size > 500) {
+    const oldestKey = globalMemoryCache.keys().next().value;
+    globalMemoryCache.delete(oldestKey);
+  }
 }
 
 // Routine pembersihan cache kadaluwarsa setiap 5 menit (mencegah memory leak)
@@ -3443,6 +3450,13 @@ app.get("/kiryuu/image", async (req, res) => {
       },
     });
 
+    // Hancurkan stream jika koneksi client terputus sebelum gambar selesai diunduh
+    req.on("close", () => {
+      if (response && response.data && !response.data.destroyed) {
+        response.data.destroy();
+      }
+    });
+
     res.set("Content-Type", response.headers["content-type"] || "image/jpeg");
     res.set("Cache-Control", "public, max-age=86400, s-maxage=86400");
     response.data.pipe(res);
@@ -3498,6 +3512,13 @@ app.get("/komiku/image", async (req, res) => {
         "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
         Referer: "https://komiku.org/",
       },
+    });
+
+    // Hancurkan stream jika koneksi client terputus sebelum gambar selesai diunduh
+    req.on("close", () => {
+      if (response && response.data && !response.data.destroyed) {
+        response.data.destroy();
+      }
     });
 
     const contentType = response.headers["content-type"] || "image/jpeg";

@@ -192,6 +192,12 @@ const cache = new Map();
 
 function setCache(key, data, ttl = 300) {
   cache.set(key, { data, expire: Date.now() + ttl * 1000 });
+
+  // Mencegah memory leak dengan membatasi ukuran cache memori maksimal 500 item
+  if (cache.size > 500) {
+    const oldestKey = cache.keys().next().value;
+    cache.delete(oldestKey);
+  }
 }
 
 function getCache(key) {
@@ -1718,6 +1724,13 @@ app.get(/^\/animeid\/stream-proxy\/(.+)/, async (req, res) => {
 
     // Forward the exact HTTP response status code (e.g. 206 Partial Content for Range requests)
     res.status(response.status);
+
+    // Hancurkan stream jika koneksi client terputus sebelum video selesai dimuat
+    req.on("close", () => {
+      if (response && response.data && !response.data.destroyed) {
+        response.data.destroy();
+      }
+    });
 
     response.data.pipe(res);
   } catch (err) {
