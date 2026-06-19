@@ -244,8 +244,8 @@ function nekoTerbaruUrl(page = 1) {
 
 function nekoSearchUrl(query, page = 1) {
   const encoded = encodeURIComponent(query).replace(/%20/g, "+");
-  if (page <= 1) return `${NEKO_BASE_URL}/search/${encoded}/`;
-  return `${NEKO_BASE_URL}/search/${encoded}/page/${page}/`;
+  if (page <= 1) return `${NEKO_BASE_URL}/search/${encoded}`; // NO trailing slash for page 1
+  return `${NEKO_BASE_URL}/search/${encoded}/page/${page}/`; // MUST have trailing slash for page > 1
 }
 
 function nekoSlug(href = "") {
