@@ -243,9 +243,9 @@ function nekoTerbaruUrl(page = 1) {
 }
 
 function nekoSearchUrl(query, page = 1) {
-  const encoded = encodeURIComponent(query);
-  if (page <= 1) return `${NEKO_BASE_URL}/search/${encoded}`;
-  return `${NEKO_BASE_URL}/search/${encoded}/page/${page}`;
+  const encoded = encodeURIComponent(query).replace(/%20/g, "+");
+  if (page <= 1) return `${NEKO_BASE_URL}/search/${encoded}/`;
+  return `${NEKO_BASE_URL}/search/${encoded}/page/${page}/`;
 }
 
 function nekoSlug(href = "") {
@@ -783,7 +783,19 @@ async function scrapeNekopoiSearch(query, page = 1, debugMode = false) {
       }
     }
 
-    if (!$ && errors.length) throw new Error(errors.join(" | "));
+    if (!$ && errors.length) {
+      const errorMsg = errors.join(" | ");
+      if (errorMsg.includes("403") || errorMsg.includes("404")) {
+        const resultObj = {
+          success: true, query,
+          pagination: { currentPage: page, totalPages: 1, hasNext: false, hasPrev: false, nextPage: null, prevPage: null },
+          total: 0, data: [],
+        };
+        if (debugMode) resultObj.debug = debug;
+        return resultObj;
+      }
+      throw new Error(errorMsg);
+    }
     if (!$) throw new Error("Tidak ada HTML Nekopoi valid yang bisa diparse");
 
     const currentPage = parseCurrentPage($);
