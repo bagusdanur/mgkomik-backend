@@ -109,6 +109,7 @@ async function fetchHtmlVariants(url) {
       run: async () => {
       const separator = NEKO_WORKER_URL.includes("?") ? "" : "?url=";
       const proxyUrl = `${NEKO_WORKER_URL}${separator}${url}`;
+      console.log('Worker-raw URL:', proxyUrl);
       const { data } = await axios.get(proxyUrl, {
         timeout: 20000,
         headers: {
@@ -139,31 +140,31 @@ async function fetchHtmlVariants(url) {
       return data;
       },
     });
-  } else {
-    attempts.push({
-      label: "direct",
-      run: async () => {
-      const { data } = await axios.get(url, {
-        timeout: 20000,
-        headers: nekoHeaders(NEKO_BASE_URL + "/"),
-        httpsAgent: nekoHttpsAgent,
-        maxRedirects: 5,
-      });
-      return data;
-      },
-    });
-
-    attempts.push({
-      label: "cloudscraper",
-      run: async () => {
-      return await cloudscraper.get(url, {
-        timeout: 20000,
-        headers: nekoHeaders(NEKO_BASE_URL + "/"),
-        agent: nekoHttpsAgent,
-      });
-      },
-    });
   }
+
+  attempts.push({
+    label: "direct",
+    run: async () => {
+    const { data } = await axios.get(url, {
+      timeout: 20000,
+      headers: nekoHeaders(NEKO_BASE_URL + "/"),
+      httpsAgent: nekoHttpsAgent,
+      maxRedirects: 5,
+    });
+    return data;
+    },
+  });
+
+  attempts.push({
+    label: "cloudscraper",
+    run: async () => {
+    return await cloudscraper.get(url, {
+      timeout: 20000,
+      headers: nekoHeaders(NEKO_BASE_URL + "/"),
+      agent: nekoHttpsAgent,
+    });
+    },
+  });
 
   const errors = [];
   const htmls = [];
@@ -234,7 +235,7 @@ function nekoEpisodeUrl(slug) {
 }
 
 function nekoAnimeUrl(slug) {
-  return `${NEKO_BASE_URL}/${slug}/`;
+  return `${NEKO_BASE_URL}/hentai/${slug}/`;
 }
 
 function nekoTerbaruUrl(page = 1) {
