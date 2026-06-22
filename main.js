@@ -833,8 +833,21 @@ async function scrapeNekopoiEpisode(url) {
       const frameId = tabId.replace("#", "");
       const iframe = $(`#${frameId} iframe`);
       const src = iframe.attr("src") || "";
-      if (src) players.push({ label: $(tabEl).text().trim(), src });
+      if (src) {
+        let label = $(tabEl).text().trim();
+        if (src.includes("streampoi.com")) {
+          label = "Ryu-lokal";
+        }
+        players.push({ label, src });
+      }
     });
+
+    // Pindahkan player streampoi (Ryu-lokal) ke posisi paling atas (pertama)
+    const streampoiIndex = players.findIndex((p) => p.src.includes("streampoi.com"));
+    if (streampoiIndex > -1) {
+      const [streampoiPlayer] = players.splice(streampoiIndex, 1);
+      players.unshift(streampoiPlayer);
+    }
     const downloads = [];
     $(".nk-download-box .nk-download-row").each((_, row) => {
       const quality = $(row).find(".nk-download-name").text().trim();
