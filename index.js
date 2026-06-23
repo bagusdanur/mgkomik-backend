@@ -2353,60 +2353,56 @@ async function scrapeDoujindesuTerbaru({ page = 1, type = "doujinshi,manga,manhw
 
 async function scrapeDoujindesuSearch(query, page = 1) {
   try {
-    const searchPath =
-      page === 1
-        ? `/?s=${encodeURIComponent(query)}`
-        : `/page/${page}/?s=${encodeURIComponent(query)}`;
-    const html = await doujindesuFetch(searchPath);
-    const $ = cheerio.load(html);
+    const limit = 12;
+    const offset = (page - 1) * limit;
+
+    const response = await doujindesuApiGet("/api/manga", {
+      search: query,
+      limit,
+      offset
+    });
+
+    const items = response.data;
+    const totalCount = parseInt(response.headers["x-total-count"] || "0", 10);
+    const totalPages = Math.ceil(totalCount / limit) || 1;
+
     const results = [];
+    const itemValues = Array.isArray(items) ? items : Object.values(items || {});
 
-    $("section.feed#archives .entries article.entry").each((_, el) => {
-      const item = $(el);
-      const detailPath = item.find("a[href*='/manga/']").first().attr("href") || "";
-      const detailLink = doujindesuUrl(detailPath);
-      const title =
-        item.find(".metadata h3.title span").first().text().trim() ||
-        item.find("figure img").first().attr("title")?.trim() ||
-        item.find("a[href*='/manga/']").first().attr("title")?.trim() ||
-        "";
-      const image = doujindesuUrl(item.find("figure.thumbnail img").first().attr("src") || "");
-      const typeGenre = item.find("figure.thumbnail .type").first().text().trim();
-      const score = item.find(".metadata .score").first().text().replace(/\s+/g, " ").trim();
-      const status = item.find(".metadata .status").first().text().trim();
-      const genres = (item.attr("data-tags") || "")
-        .split("|")
-        .map((genre) => genre.trim())
+    for (const item of itemValues) {
+      if (!item.title || !item.slug) continue;
+
+      const detailLink = `${DOUJINDESU_BASE_URL}/manga/${item.slug}`;
+      const image = item.cover_url || "";
+      
+      const genres = (item.terms || "")
+        .split(",")
+        .map(term => {
+          const parts = term.split(":");
+          return parts[1] === "genre" ? parts[0] : null;
+        })
         .filter(Boolean);
-
-      if (!title || !detailPath) return;
 
       results.push({
         source: "doujindesu",
-        title,
+        title: item.title,
         image,
         detail_link: detailLink,
-        update: status,
-        slug: doujindesuSlug(detailPath),
-        type_genre: typeGenre,
-        status,
-        score,
+        update: item.status || "",
+        slug: item.slug,
+        type_genre: item.type || "Manga",
+        status: item.status || "",
+        score: String(item.rating || ""),
         genres,
       });
-    });
-
-    const pages = [];
-    $("section.feed#archives nav.pagination a").each((_, el) => {
-      const pageNumber = parseInt($(el).text().trim(), 10);
-      if (!Number.isNaN(pageNumber)) pages.push(pageNumber);
-    });
+    }
 
     return {
       success: true,
-      total: results.length,
+      total: totalCount,
       query,
       page,
-      totalPages: pages.length ? Math.max(...pages) : page,
+      totalPages,
       data: results,
     };
   } catch (err) {
