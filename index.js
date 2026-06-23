@@ -1403,15 +1403,117 @@ const typeGenre = typeClass
   }
 }
 
-const DOUJINDESU_BASE_URL = "https://doujindesu.tv";
+const DOUJINDESU_BASE_URL = "https://doujin.desu.xxx";
 const DOUJINDESU_PROXY_URL = "https://proxy.kopipaitboskuh.workers.dev/?url=";
 const DOUJINDESU_CF_IP = "104.26.8.62";
 const DOUJINDESU_IMAGE_PROBE_BATCH_SIZE = 16;
 const DOUJINDESU_IMAGE_CACHE_TTL = 1000 * 60 * 30;
 const doujindesuImageCache = new Map();
+
+// Helper to format ISO date strings to Indonesian relative time
+function timeAgo(dateStr) {
+  if (!dateStr) return "";
+  const date = new Date(dateStr);
+  const now = new Date();
+  const seconds = Math.floor((now - date) / 1000);
+  if (seconds < 60) return "baru saja";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} menit lalu`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} jam lalu`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days} hari lalu`;
+  const weeks = Math.floor(days / 7);
+  if (weeks < 4) return `${weeks} minggu lalu`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months} bulan lalu`;
+  const years = Math.floor(days / 365);
+  return `${years} tahun lalu`;
+}
+
+// Cryptographic helpers for decrypting responses from doujin.desu.xxx API
+const DOUJINDESU_SALT = "doujindesu-scrapers-cannot-read-this-super-secret-salt-2026-v2";
+const DOUJINDESU_TTL_MS = 36e5; // 1 hour
+
+function doujindesuHashSeed(seed) {
+  const salted = DOUJINDESU_SALT + "_" + seed;
+  let hash = 0;
+  for (let i = 0; i < salted.length; i++) {
+    hash = (hash << 5) - hash + salted.charCodeAt(i);
+    hash |= 0;
+  }
+  let result = "";
+  let l = Math.abs(hash) || 123456789;
+  for (let i = 0; i < 32; i++) {
+    l = (l * 1664525 + 1013904223) % 4294967296;
+    result += String.fromCharCode(33 + (l % 93));
+  }
+  return result;
+}
+
+function getDoujindesuKeys() {
+  const now = Date.now();
+  const seed = Math.floor(now / DOUJINDESU_TTL_MS);
+  return [
+    doujindesuHashSeed(seed),
+    doujindesuHashSeed(seed - 1),
+    doujindesuHashSeed(seed + 1)
+  ];
+}
+
+function decryptDoujindesuResponse(hexData, key) {
+  const bytes = [];
+  for (let i = 0; i < hexData.length; i += 2) {
+    const segment = hexData.substring(i, i + 2);
+    if (!segment) break;
+    bytes.push(parseInt(segment, 16));
+  }
+  const chars = [];
+  const keyLen = key.length;
+  let d = 42;
+  for (let i = 0; i < bytes.length; i++) {
+    const p = bytes[i];
+    const f = key.charCodeAt(i % keyLen);
+    const decryptedChar = p ^ f ^ (i * 13) ^ d;
+    chars.push(String.fromCharCode(decryptedChar & 255));
+    d = (d + p) % 256;
+  }
+  const decoded = decodeURIComponent(chars.join(""));
+  return JSON.parse(decoded);
+}
+
+async function doujindesuApiGet(path, params = {}) {
+  const url = `${DOUJINDESU_BASE_URL}${path}`;
+  const response = await axios.get(url, {
+    params,
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "X-App-Secret": "dfdf72051dbfdc7d76889ebd31324e74",
+      Referer: DOUJINDESU_BASE_URL,
+    },
+    timeout: 20000,
+  });
+
+  const responseData = response.data;
+  if (responseData && responseData._enc_resp_) {
+    const keys = getDoujindesuKeys();
+    for (const key of keys) {
+      try {
+        const decrypted = decryptDoujindesuResponse(responseData._enc_resp_, key);
+        return { data: decrypted, headers: response.headers };
+      } catch (err) {
+        // try next key
+      }
+    }
+    throw new Error("Gagal mendekripsi respons API Doujindesu");
+  }
+  return { data: responseData, headers: response.headers };
+}
+
 const doujindesuCloudflareAgent = new https.Agent({
   lookup: (hostname, options, callback) => {
-    if (hostname === "doujindesu.tv") {
+    if (hostname === "doujin.desu.xxx") {
       if (options?.all) {
         return callback(null, [{ address: DOUJINDESU_CF_IP, family: 4 }]);
       }
@@ -2179,73 +2281,67 @@ async function scrapeSekteChapter(slug) {
   }
 }
 
-async function scrapeDoujindesuTerbaru({ page = 1 } = {}) {
+async function scrapeDoujindesuTerbaru({ page = 1, type = "doujinshi,manga,manhwa" } = {}) {
   try {
-    const url = page === 1 ? "/manhwa/" : `/manhwa/page/${page}/`;
-    const html = await doujindesuFetch(url);
-    const $ = cheerio.load(html);
+    const limit = 12;
+    const offset = (page - 1) * limit;
+
+    const response = await doujindesuApiGet("/api/manga", {
+      limit,
+      offset,
+      type
+    });
+
+    const items = response.data;
+    const totalCount = parseInt(response.headers["x-total-count"] || "0", 10);
+    const totalPages = Math.ceil(totalCount / limit) || 1;
+
     const results = [];
+    const itemValues = Array.isArray(items) ? items : Object.values(items || {});
 
-    $("section.feed#archives .entries article.entry").each((_, el) => {
-      const item = $(el);
-      const detailPath = item.find("a[href*='/manga/']").first().attr("href") || "";
-      const detailLink = doujindesuUrl(detailPath);
-      const title =
-        item.find(".metadata h3.title span").first().text().trim() ||
-        item.find("figure img").first().attr("title")?.trim() ||
-        item.find("a[href*='/manga/']").first().attr("title")?.trim() ||
-        "";
+    for (const item of itemValues) {
+      if (!item.title || !item.slug) continue;
 
-      const image = doujindesuUrl(item.find("figure.thumbnail img").first().attr("src") || "");
-      const typeGenre = item.find("figure.thumbnail .type").first().text().trim() || "Manhwa";
-      const chapterEl = item.find(".metadata .artists a").first();
-      const chapterPath = chapterEl.attr("href") || "";
-      const chapterTitle =
-        chapterEl.find("span").first().text().trim() || chapterEl.text().trim();
-      const info = item.find(".metadata .artists .dtch").first().text().trim();
-      const genres = (item.attr("data-tags") || "")
-        .split("|")
-        .map((genre) => genre.trim())
-        .filter(Boolean);
-
-      if (!title || !detailPath) return;
+      const detailLink = `${DOUJINDESU_BASE_URL}/manga/${item.slug}`;
+      const image = item.cover_url || "";
+      const typeGenre = item.type || "Manga";
+      
+      const latestChapter = item.chapters && item.chapters[0];
+      const chapterTitle = latestChapter ? `Chapter ${latestChapter.chapter_number}` : "";
+      const chapterSlug = latestChapter ? `${item.slug}-chapter-${latestChapter.chapter_number}` : "";
+      const chapterLink = latestChapter ? `${DOUJINDESU_BASE_URL}/chapters/${latestChapter.id}` : "";
+      const info = latestChapter ? timeAgo(latestChapter.created_at) : (item.updated_at ? timeAgo(item.updated_at) : "");
 
       results.push({
         source: "doujindesu",
-        title,
-        slug: doujindesuSlug(detailPath),
+        title: item.title,
+        slug: item.slug,
         image,
         detail_link: detailLink,
-        description: "",
+        description: item.description || "",
         type_genre: typeGenre,
-        genres,
+        genres: [],
         info,
         update: chapterTitle,
         chapter_terbaru: chapterTitle,
-        chapter_slug: doujindesuPathSlug(chapterPath),
-        chapter_link: doujindesuUrl(chapterPath),
+        chapter_slug: chapterSlug,
+        chapter_link: chapterLink,
       });
-    });
-
-    const pages = [];
-    $("section.feed#archives nav.pagination a").each((_, el) => {
-      const pageNumber = parseInt($(el).text().trim(), 10);
-      if (!Number.isNaN(pageNumber)) pages.push(pageNumber);
-    });
+    }
 
     return {
       success: true,
-      source: "doujindesu.tv",
+      source: "doujin.desu.xxx",
       page,
-      totalPages: pages.length ? Math.max(...pages) : page,
-      total: results.length,
+      totalPages,
+      total: totalCount,
       data: results,
     };
   } catch (err) {
     console.error("Doujindesu terbaru error:", err.message);
     return {
       success: false,
-      source: "doujindesu.tv",
+      source: "doujin.desu.xxx",
       page,
       total: 0,
       data: [],
@@ -2329,105 +2425,95 @@ async function scrapeDoujindesuSearch(query, page = 1) {
 
 async function scrapeDoujindesuDetail(slug) {
   try {
-    const detailPath = slug.startsWith("http") ? slug : `/manga/${slug}/`;
-    const detailLink = doujindesuUrl(detailPath);
-    const html = await doujindesuFetch(detailPath);
-    const $ = cheerio.load(html);
-    const metadata = $("main#archive .wrapper > section.metadata").first();
-    const titleNode = metadata.find("h1.title").first().clone();
-    const alternativeTitle = titleNode.find(".alter").text().trim();
+    // Normalize slug to exclude prefix paths if any
+    const cleanSlug = slug.replace(/^.*\/manga\//, "").replace(/\/$/, "");
+    const response = await doujindesuApiGet(`/api/manga/${cleanSlug}`);
+    const item = response.data;
+    if (!item || !item.title) {
+      throw new Error("Manga tidak ditemukan");
+    }
 
-    titleNode.find(".alter").remove();
+    const detailLink = `${DOUJINDESU_BASE_URL}/manga/${item.slug}`;
+    const image = item.cover_url || "";
 
-    const title = titleNode.text().replace(/\s+/g, " ").trim();
-    const image = doujindesuUrl(
-      $("main#archive .wrapper aside figure.thumbnail img").first().attr("src") || "",
-    );
-    const info = {};
+    const genres = [];
+    const authors = [];
+    let series = "";
+    const groups = [];
+    const characters = [];
 
-    metadata.find("table tr").each((_, el) => {
-      const key = $(el).find("td").first().text().replace(/\s+/g, " ").trim();
-      const valueCell = $(el).find("td").eq(1);
-      const values = valueCell
-        .find("a")
-        .map((__, a) => $(a).text().replace(/\s+/g, " ").trim())
-        .get()
-        .filter(Boolean);
-      const value = values.length
-        ? values.join(", ")
-        : valueCell.text().replace(/\s+/g, " ").trim();
-
-      if (key) info[key.toLowerCase().replace(/\s+/g, "_")] = value;
-    });
-
-    const genres = metadata
-      .find(".tags a")
-      .map((_, el) => $(el).text().replace(/\s+/g, " ").trim())
-      .get()
-      .filter(Boolean);
-
-    const synopsis = metadata
-      .find(".pb-2 p")
-      .first()
-      .text()
-      .replace(/^Sinopsis:\s*/i, "")
-      .replace(/\s+/g, " ")
-      .trim();
+    if (item.term_list) {
+      item.term_list.split("|").forEach(term => {
+        const parts = term.split(":");
+        if (parts.length >= 3) {
+          const name = parts[0];
+          const type = parts[1];
+          if (type === "genre") genres.push(name);
+          else if (type === "author") authors.push(name);
+          else if (type === "series") series = name;
+          else if (type === "group") groups.push(name);
+          else if (type === "character") characters.push(name);
+        }
+      });
+    }
 
     const chapters = [];
-    $("#chapter_list li").each((_, el) => {
-      const chapter = $(el);
-      const chapterPath = chapter.find(".epsleft .lchx a").first().attr("href") ||
-        chapter.find(".eps a").first().attr("href") ||
-        "";
-      const chapterTitle = chapter.find(".epsleft .lchx a").first().text().trim();
-      const chapterNumber = chapter.find(".eps chapter").first().text().trim();
-      const date = chapter.find(".epsleft .date").first().text().trim();
-      const downloadPath = chapter.find(".chright .linkdl a").first().attr("href") || "";
-
-      if (!chapterTitle && !chapterPath) return;
-
-      chapters.push({
-        title: chapterTitle,
-        chapter: chapterNumber,
-        slug: doujindesuPathSlug(chapterPath),
-        link: doujindesuUrl(chapterPath),
-        date,
-        is_new: chapter.find(".newchlabel").length > 0,
-        download_link: downloadPath,
+    if (Array.isArray(item.chapters)) {
+      item.chapters.forEach(ch => {
+        const chTitle = ch.title || `Chapter ${ch.chapter_number}`;
+        const chLink = `${DOUJINDESU_BASE_URL}/chapters/${ch.id}`;
+        chapters.push({
+          title: chTitle,
+          chapter: String(ch.chapter_number),
+          slug: ch.id,
+          link: chLink,
+          date: timeAgo(ch.created_at),
+          is_new: (Date.now() - new Date(ch.created_at).getTime()) < 864e5,
+          download_link: ch.download_link || "",
+        });
       });
-    });
+    }
 
     const latestChapter = chapters[0] || null;
     const firstChapter = chapters[chapters.length - 1] || null;
+    
+    // Ryukomik expects chapters ordered oldest to newest
     chapters.reverse();
+
+    let synopsis = item.description || "";
+    synopsis = synopsis
+      .replace(/^(&lt;|<)p(&gt;|>)(&lt;|<)strong(&gt;|>)Sinopsis:(&lt;|<)\/strong(&gt;|>)(&lt;|<)br\s*\/(&gt;|>)/i, "")
+      .replace(/^(&lt;|<)p(&gt;|>)(&lt;|<)strong(&gt;|>)Synopsis:(&lt;|<)\/strong(&gt;|>)(&lt;|<)br\s*\/(&gt;|>)/i, "")
+      .replace(/^(&lt;|<)p(&gt;|>)/i, "")
+      .replace(/(&lt;|<)\/p(&gt;|>)$/i, "")
+      .trim();
 
     return {
       success: true,
       data: {
         source: "doujindesu",
-        title,
-        slug: doujindesuSlug(detailLink),
+        title: item.title,
+        slug: item.slug,
         thumbnail: image,
         image,
         detail_link: detailLink,
-        alternative_title: alternativeTitle,
-        type: info.type || "",
-        type_genre: info.type || "",
-        status: info.status || "",
-        Pengarang: info.author || "",
-        Umur: info.rating || "",
-        Konsep: info.serialization || info.series || "",
-        series: info.series || "",
-        author: info.author || "",
-        serialization: info.serialization || "",
-        rating: info.rating || "",
-        created_date: info.created_date || "",
+        alternative_title: item.alt_titles || "",
+        type: item.type || "",
+        type_genre: item.type || "",
+        status: item.status || "",
+        Pengarang: authors.join(", ") || "",
+        Umur: String(item.rating || ""),
+        Konsep: item.serialization || series || "",
+        series: series || "",
+        author: authors.join(", ") || "",
+        serialization: item.serialization || "",
+        rating: String(item.rating || ""),
+        created_date: item.created_at ? timeAgo(item.created_at) : "",
         genres,
         synopsis,
-        info: latestChapter?.date || info.created_date || "",
-        chapter_awal: firstChapter?.title || "",
-        chapter_terbaru: latestChapter?.title || "",
+        info: latestChapter ? latestChapter.date : (item.updated_at ? timeAgo(item.updated_at) : ""),
+        chapter_awal: firstChapter ? firstChapter.title : "",
+        chapter_terbaru: latestChapter ? latestChapter.title : "",
         total_chapter: chapters.length,
         total_chapters: chapters.length,
         chapters,
@@ -2446,104 +2532,52 @@ async function scrapeDoujindesuDetail(slug) {
 
 async function scrapeDoujindesuChapter(slug) {
   try {
-    const chapterPath = slug.startsWith("http") ? slug : `/${slug.replace(/^\/+/, "")}/`;
-    const chapterLink = doujindesuUrl(chapterPath);
-    const html = await doujindesuFetch(chapterPath);
-    const $ = cheerio.load(html);
-    const reader = $("main#reader").first();
-    const header = reader.find("section.metadata header").first();
-    const title = header.find("h1").first().text().replace(/\s+/g, " ").trim();
-    const seriesEl = header.find(".epx a[href*='/manga/']").first();
-    const seriesTitle = seriesEl.text().replace(/\s+/g, " ").trim();
-    const seriesLink = doujindesuUrl(seriesEl.attr("href") || "");
-    const date = header
-      .find(".epx")
-      .first()
-      .clone()
-      .children()
-      .remove()
-      .end()
-      .text()
-      .replace(/\s*,?\s*in\s*$/i, "")
-      .replace(/\s+/g, " ")
-      .trim();
-    const description = reader
-      .find(".desch")
-      .first()
-      .text()
-      .replace(/\s+/g, " ")
-      .trim();
-
-    const navTop = reader.find("> header .naveps").first();
-    const prevPath = navTop.find("a[title='Previous Chapter']").first().attr("href") || "";
-    const allChapterPath = navTop.find("a[title='All Chapter']").first().attr("href") || "";
-    const nextAnchor = navTop.find(".nvs.rght a").first();
-    const nextPath = nextAnchor.hasClass("nonex") ? "" : nextAnchor.attr("href") || "";
-    const downloadLink = navTop.find(".linkdl a").first().attr("href") || "";
-    const mangaId = doujindesuSlug(seriesLink);
-    const chapterSlug = reader.attr("data-slug") || doujindesuPathSlug(chapterPath);
-
-    const imageSet = new Set();
-    const pushImage = (url) => {
-      const image = doujindesuNormalizeImageUrl(url);
-      if (image) imageSet.add(image);
-    };
-
-    reader.find("#anu img, #anu noscript img").each((_, el) => {
-      const img = $(el);
-      [
-        img.attr("data-src"),
-        img.attr("data-lazy-src"),
-        img.attr("data-original"),
-        img.attr("src"),
-      ].forEach(pushImage);
-
-      [img.attr("data-srcset"), img.attr("srcset")]
-        .filter(Boolean)
-        .flatMap((srcset) => srcset.split(","))
-        .map((entry) => entry.trim().split(/\s+/)[0])
-        .forEach(pushImage);
-    });
-
-    const imageUrlMatches = html.match(/https?:\\?\/\\?\/desu\.photos\/storage\/uploads\/[^"'<>\s]+(?:%20|\\? |[^"'<>\s])*?\.webp/gi) || [];
-    imageUrlMatches.forEach((image) => {
-      pushImage(image.replace(/\\\//g, "/"));
-    });
-
-    const images = [...imageSet];
-
-    if (!images.length) {
-      const probedImages = await probeDoujindesuChapterImages(seriesTitle, title);
-      images.push(...probedImages);
+    // Normalize slug to exclude prefix paths if any
+    const cleanSlug = slug.replace(/^.*\/chapters\//, "").replace(/\/$/, "");
+    const response = await doujindesuApiGet(`/api/chapters/${cleanSlug}`);
+    const item = response.data;
+    if (!item || !item.title) {
+      throw new Error("Chapter tidak ditemukan");
     }
+
+    const mangaSlug = item.manga_slug || (item.manga && item.manga.slug) || "";
+    const mangaTitle = item.manga_title || (item.manga && item.manga.title) || "";
+    
+    const chapterLink = `${DOUJINDESU_BASE_URL}/chapters/${item.id}`;
+    const seriesLink = `${DOUJINDESU_BASE_URL}/manga/${mangaSlug}`;
+
+    const images = Array.isArray(item.content_urls) ? item.content_urls : [];
+
+    const prevPath = item.prev_id ? String(item.prev_id) : "";
+    const nextPath = item.next_id ? String(item.next_id) : "";
 
     return {
       success: true,
       source: "doujindesu",
-      mangaId,
-      chapterSlug,
-      currentChapter: title,
-      title,
-      slug: chapterSlug,
-      chapter_id: reader.attr("data-id") || "",
-      total_pages: parseInt(reader.attr("data-total-pages"), 10) || images.length,
+      mangaId: mangaSlug,
+      chapterSlug: item.id,
+      currentChapter: item.title,
+      title: item.title,
+      slug: item.id,
+      chapter_id: item.id,
+      total_pages: images.length,
       image_count: images.length,
       totalImages: images.length,
       chapter_link: chapterLink,
       series: {
-        title: seriesTitle,
-        slug: mangaId,
+        title: mangaTitle,
+        slug: mangaSlug,
         link: seriesLink,
       },
-      date,
-      description,
-      prev: prevPath ? doujindesuPathSlug(prevPath) : "",
-      prev_link: prevPath ? doujindesuUrl(prevPath) : "",
-      next: nextPath ? doujindesuPathSlug(nextPath) : "",
-      next_link: nextPath ? doujindesuUrl(nextPath) : "",
-      back_to_detail: mangaId,
-      detail_link: allChapterPath ? doujindesuUrl(allChapterPath) : seriesLink,
-      download_link: downloadLink,
+      date: timeAgo(item.created_at),
+      description: "",
+      prev: prevPath,
+      prev_link: prevPath ? `${DOUJINDESU_BASE_URL}/chapters/${prevPath}` : "",
+      next: nextPath,
+      next_link: nextPath ? `${DOUJINDESU_BASE_URL}/chapters/${nextPath}` : "",
+      back_to_detail: mangaSlug,
+      detail_link: seriesLink,
+      download_link: item.download_link || "",
       images,
     };
   } catch (err) {
@@ -3729,8 +3763,14 @@ app.get(
   ["/doujindesu/terbaru", "/doujindesu/pustaka", "/doujindesu/manhwa/terbaru"],
   async (req, res) => {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    
+    // Determine target type dynamically
+    let type = "doujinshi,manga,manhwa";
+    if (req.path.includes("manhwa")) {
+      type = "manhwa";
+    }
 
-    const cacheKey = `doujindesu:terbaru:p:${page}`;
+    const cacheKey = `doujindesu:${type}:p:${page}`;
     const cached = getCache(cacheKey);
     if (cached) {
       console.log(`⚡ [Cache Hit] ${cacheKey}`);
@@ -3738,7 +3778,7 @@ app.get(
     }
 
     try {
-      const result = await coalescedScrape(cacheKey, () => scrapeDoujindesuTerbaru({ page }));
+      const result = await coalescedScrape(cacheKey, () => scrapeDoujindesuTerbaru({ page, type }));
       if (!result.success) {
         return res.status(500).json(result);
       }
