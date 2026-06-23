@@ -199,6 +199,55 @@ function rewriteKiryuuImages(payload, req) {
   return rewritten;
 }
 
+function toDoujindesuBackendImageUrl(url, req) {
+  if (!url) return "";
+  let targetUrl = url;
+  if (targetUrl.includes("desu.photos/uploads/")) {
+    targetUrl = targetUrl.replace("desu.photos/uploads/", "desu.photos/storage/uploads/");
+  }
+  return `${getRequestBaseUrl(req)}/doujindesu/image?url=${encodeURIComponent(targetUrl)}`;
+}
+
+function rewriteDoujindesuImages(payload, req) {
+  if (Array.isArray(payload)) {
+    return payload.map((item) => {
+      if (typeof item === "string" && (item.includes("desu.photos") || item.includes("doujin.desu.xxx"))) {
+        return toDoujindesuBackendImageUrl(item, req);
+      }
+      return rewriteDoujindesuImages(item, req);
+    });
+  }
+
+  if (!payload || typeof payload !== "object") {
+    if (typeof payload === "string" && (payload.includes("desu.photos") || payload.includes("doujin.desu.xxx"))) {
+      return toDoujindesuBackendImageUrl(payload, req);
+    }
+    return payload;
+  }
+
+  const rewritten = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if ((key === "image" || key === "thumbnail" || key === "cover") && typeof value === "string") {
+      rewritten[key] = toDoujindesuBackendImageUrl(value, req);
+      continue;
+    }
+
+    if (key === "images" && Array.isArray(value)) {
+      rewritten[key] = value.map(img => typeof img === "string" ? toDoujindesuBackendImageUrl(img, req) : img);
+      continue;
+    }
+
+    if (value && typeof value === "object") {
+      rewritten[key] = rewriteDoujindesuImages(value, req);
+      continue;
+    }
+
+    rewritten[key] = value;
+  }
+
+  return rewritten;
+}
+
 function isCloudflareChallenge(html = "") {
   return /Just a moment|cf_chl|challenge-platform|Enable JavaScript and cookies/i.test(
     String(html),
@@ -3566,6 +3615,37 @@ app.get("/komiku/image", async (req, res) => {
   }
 });
 
+app.get("/doujindesu/image", async (req, res) => {
+  try {
+    const imageUrl = req.query.url;
+
+    if (!imageUrl || !(imageUrl.includes("desu.photos") || imageUrl.includes("doujin.desu.xxx"))) {
+      return res.status(400).send("URL gambar Doujindesu tidak valid");
+    }
+
+    const response = await axios.get(imageUrl, {
+      responseType: "stream",
+      timeout: 30000,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        Referer: DOUJINDESU_BASE_URL,
+        Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+      },
+      httpsAgent: doujindesuCloudflareAgent,
+    });
+
+    res.set({
+      "Content-Type": response.headers["content-type"] || "image/webp",
+      "Cache-Control": "public, max-age=86400",
+    });
+
+    response.data.pipe(res);
+  } catch (err) {
+    res.status(500).send("Gagal mengambil gambar: " + err.message);
+  }
+});
+
 app.get("/kiryuu/detail/:slug", async (req, res) => {
   const { slug } = req.params;
   if (!slug) {
@@ -3779,8 +3859,9 @@ app.get(
         return res.status(500).json(result);
       }
 
-      setCache(cacheKey, result, 60); // 1 menit
-      res.json(result);
+      const mappedResult = rewriteDoujindesuImages(result, req);
+      setCache(cacheKey, mappedResult, 60); // 1 menit
+      res.json(mappedResult);
     } catch (err) {
       res.status(500).json({ success: false, error: err.message });
     }
@@ -3924,8 +4005,9 @@ app.get("/doujindesu/detail/:slug", async (req, res) => {
       return res.status(500).json(result);
     }
 
-    setCache(cacheKey, result, 900); // 15 menit
-    res.json(result);
+    const mappedResult = rewriteDoujindesuImages(result, req);
+    setCache(cacheKey, mappedResult, 1800); // 30 menit
+    res.json(mappedResult);
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -3955,8 +4037,9 @@ app.get("/doujindesu/search", async (req, res) => {
       return res.status(500).json(result);
     }
 
-    setCache(cacheKey, result, 60); // 1 menit
-    res.json(result);
+    const mappedResult = rewriteDoujindesuImages(result, req);
+    setCache(cacheKey, mappedResult, 300); // 5 menit
+    res.json(mappedResult);
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -3984,8 +4067,9 @@ app.get(/^\/doujindesu\/chapter\/(.+)/, async (req, res) => {
       return res.status(500).json(result);
     }
 
-    setCache(cacheKey, result, 7200); // 2 jam
-    res.json(result);
+    const mappedResult = rewriteDoujindesuImages(result, req);
+    setCache(cacheKey, mappedResult, 7200); // 2 jam
+    res.json(mappedResult);
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
