@@ -163,6 +163,60 @@ function parsePlatforms($, el) {
   return [...new Set(platforms)];
 }
 
+function parseGameElement($, el, isHot = false) {
+  const item = $(el);
+  const anchor = item.find(".dl a").first();
+  const detailPath = anchor.attr("href") || "";
+  const title = item.find(".ginfo h3.tt").first().text().replace(/\s+/g, " ").trim();
+  const bannerImg = getImage(item.find(".bimg img").first(), $);
+  const thumbnail = normalizeImageUrl(
+    item.find(".lgicon img").first().attr("data-src") ||
+      item.find(".lgicon img").first().attr("src") ||
+      ""
+  );
+  const engine =
+    item.find(".engine").first().text().replace(/\s+/g, " ").trim() || "";
+  const status =
+    item
+      .find(".enginestatus span")
+      .not(".engine")
+      .first()
+      .text()
+      .replace(/\s+/g, " ")
+      .trim() || "";
+  const date = item.find("span.dt").first().text().replace(/\s+/g, " ").trim();
+  const slug = gameSlug(detailPath);
+  
+  // Extract version from title
+  let version = "";
+  const versionMatch = title.match(/(?:v|version\s*|release\s*)(\d+[\d.]*[a-z]?)/i);
+  if (versionMatch) {
+    version = versionMatch[1];
+  } else {
+    const bracketMatch = title.match(/\[([^\]]+)\]/);
+    if (bracketMatch) version = bracketMatch[1];
+  }
+
+  const platforms = parsePlatforms($, el);
+
+  if (!title || !detailPath) return null;
+
+  return {
+    source: "androidadult",
+    title,
+    slug,
+    image: bannerImg,
+    thumbnail,
+    detail_link: gameUrl(detailPath),
+    engine,
+    status,
+    date,
+    version,
+    platforms,
+    is_hot: isHot,
+  };
+}
+
 async function scrapeGameTerbaru({ page = 1 } = {}) {
   try {
     const cacheKey = `game-terbaru-${page}`;
@@ -174,51 +228,26 @@ async function scrapeGameTerbaru({ page = 1 } = {}) {
     const $ = cheerio.load(html);
     const results = [];
 
-    // Parse carousel/featured games
-    $(".carousel .game").each((_, el) => {
-      const item = $(el);
-      const anchor = item.find(".dl a").first();
-      const detailPath = anchor.attr("href") || "";
-      const title = item.find(".ginfo h3.tt").first().text().replace(/\s+/g, " ").trim();
-      const bannerImg = getImage(item.find(".bimg img").first(), $);
-      const thumbnail = normalizeImageUrl(
-        item.find(".lgicon img").first().attr("data-src") ||
-          item.find(".lgicon img").first().attr("src") ||
-          ""
-      );
-      const engine =
-        item.find(".engine").first().text().replace(/\s+/g, " ").trim() || "";
-      const status =
-        item
-          .find(".enginestatus span")
-          .not(".engine")
-          .first()
-          .text()
-          .replace(/\s+/g, " ")
-          .trim() || "";
-      const date = item.find("span.dt").first().text().replace(/\s+/g, " ").trim();
-      const slug = gameSlug(detailPath);
-      const isHot = item.find(".hotgames").length > 0;
-      const platforms = parsePlatforms($, el);
-
-      if (!title || !detailPath) return;
-
-      results.push({
-        source: "androidadult",
-        title,
-        slug,
-        image: bannerImg,
-        thumbnail,
-        detail_link: gameUrl(detailPath),
-        engine,
-        status,
-        date,
-        platforms,
-        is_hot: isHot,
+    // Parse carousel/featured games (only on page 1)
+    if (page === 1) {
+      $(".carousel .game").each((_, el) => {
+        const isHot = $(el).find(".hotgames").length > 0;
+        const parsed = parseGameElement($, el, isHot);
+        if (parsed) results.push(parsed);
       });
+    }
+
+    // Parse main listing of new games: postlist games (pages 1 and 2+)
+    $(".postlist .game").each((_, el) => {
+      const parsed = parseGameElement($, el, false);
+      if (parsed) {
+        // Cek duplikat
+        if (results.some((r) => r.slug === parsed.slug)) return;
+        results.push(parsed);
+      }
     });
 
-    // Parse appitem listing (latest games grid) — di halaman page 2+
+    // Parse appitem listing (latest/trending/updated games grid) — legacy layout support
     $(".block .appitems .appitem, .updatedgames .appitem").each((_, el) => {
       const item = $(el);
       const anchor = item.find("> a").first();
