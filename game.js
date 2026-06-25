@@ -513,16 +513,69 @@ async function scrapeGameDetail(slug) {
       });
     }
 
-    // Fallback if the hidden input doesn't exist
-    if (downloads.length === 0) {
+      // Try the generic links
       $(".downloadfiles a, #downloadfiles a, a.bgdownload").each((_, el) => {
         const href = $(el).attr("href") || "";
         const text = $(el).text().replace(/\s+/g, " ").trim();
-        if (href && text && !href.startsWith("#")) {
-          downloads.push({ name: text, url: href, platform: "", category: "" });
+        if (href && text && !href.startsWith("#") && !href.includes("dlsite.com") && !href.includes("patreon.com") && !href.includes("fanbox.cc")) {
+          // Additional check: filter out "play online" if it's lewdsteam
+          if (href.includes("lewdsteam.com")) {
+             downloads.push({ name: text, url: href, platform: "Web", category: "Web" });
+          } else {
+             downloads.push({ name: text, url: href, platform: "", category: "" });
+          }
         }
       });
-    }
+
+      // Also try form inputs
+      $(".buttondownload, .buttondownloadpc, .buttondownloadmac").each((_, el) => {
+        const form = $(el).closest("form");
+        if (form.length > 0) {
+          const addDownload = (inputName, label, platformStr, categoryStr, sizeInputName) => {
+            const url = form.find(`input[name='${inputName}']`).attr("value");
+            let size = "";
+            if (sizeInputName) {
+              size = form.find(`input[name='${sizeInputName}']`).attr("value") || "";
+            }
+            if (url && url.startsWith("http")) {
+              let finalName = label;
+              if (size) finalName += ` (${size})`;
+              downloads.push({
+                name: finalName,
+                url: url,
+                platform: platformStr,
+                category: categoryStr
+              });
+            }
+          };
+
+          // Android APKs
+          addDownload("getpostidapkfile", "APK", "Android", "Android", "getpostidapk_size");
+          addDownload("getpostidmirrorapk", "APK (Mirror)", "Android", "Android", "");
+          
+          // Android Mod
+          addDownload("getpostidmod_apk", "Mod APK", "Android", "Android", "getpostidmod_apk_size");
+          addDownload("getpostidmirrormodapk", "Mod APK (Mirror)", "Android", "Android", "");
+          addDownload("vip_mod", "VIP Mod APK", "Android", "Android", "vip_mod_size");
+          addDownload("vip_mod_mirror", "VIP Mod APK (Mirror)", "Android", "Android", "");
+          
+          // Android OBB
+          addDownload("getpostidobbfile", "OBB", "Android", "Android", "getpostidobbfile_size");
+          addDownload("getpostidmirrorobb", "OBB (Mirror)", "Android", "Android", "");
+          addDownload("getmodobbfile", "Mod OBB", "Android", "Android", "getmodobbfile_size");
+          addDownload("getpostidmirrormodobb", "Mod OBB (Mirror)", "Android", "Android", "");
+          
+          // PC/Win
+          addDownload("getpostidpcfile", "PC Version", "Win", "Win", "getpostidpc_size");
+          addDownload("getpostpc", "PC Version", "Win", "Win", "getpostpc_size");
+          addDownload("getpostidmirrorpc", "PC Version (Mirror)", "Win", "Win", "");
+          
+          // Mac
+          addDownload("getpostidmacfile", "Mac Version", "Mac", "Mac", "getpostidmac_size");
+          addDownload("getpostmac", "Mac Version", "Mac", "Mac", "getpostmac_size");
+          addDownload("getpostidmirrormac", "Mac Version (Mirror)", "Mac", "Mac", "");
+        }
+      });
 
     // Platform badges
     const platforms = [];
