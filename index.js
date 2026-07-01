@@ -171,6 +171,9 @@ function getOriginalKiryuuImageUrl(url = "") {
 function toKiryuuBackendImageUrl(url, req) {
   const originalUrl = getOriginalKiryuuImageUrl(url);
   if (!originalUrl) return "";
+  if (originalUrl.includes("cdn.uqni.net")) {
+    return originalUrl;
+  }
   return `${getRequestBaseUrl(req)}/kiryuu/image?url=${encodeURIComponent(originalUrl)}`;
 }
 
