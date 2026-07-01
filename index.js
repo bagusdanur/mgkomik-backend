@@ -84,7 +84,7 @@ async function coalescedScrape(urlKey, scrapeFn) {
     console.log(`🔗 [Coalescing] Reusing active scrape promise for: ${urlKey}`);
     return activeScrapes.get(urlKey);
   }
-  
+
   const promise = (async () => {
     try {
       return await scrapeFn();
@@ -92,9 +92,9 @@ async function coalescedScrape(urlKey, scrapeFn) {
       throw err;
     }
   })();
-  
+
   activeScrapes.set(urlKey, promise);
-  
+
   try {
     return await promise;
   } finally {
@@ -516,7 +516,7 @@ async function scrapeKiryuuDetail(url) {
           const link = chapter.find("a").attr("href") || "";
           const rawDate = chapter.find("time").text().trim();
           const date = convertTimeToID(rawDate);
-          
+
 
           // ambil link download dari button onclick
           const onclick = chapter.find("button").attr("onclick") || "";
@@ -943,14 +943,14 @@ async function scrapeKomikuChapter(url) {
 
     const pagePrev = normalizeKomikuSlug(
       $(".toolbar a[aria-label='Prev']").first().attr("href") ||
-        $(".nxpr a").first().attr("href") ||
-        "",
+      $(".nxpr a").first().attr("href") ||
+      "",
     );
     const pageNext = normalizeKomikuSlug(
       $(".toolbar a[aria-label='Next']").first().attr("href") ||
-        $(".pagination a.next").first().attr("href") ||
-        $(".nextch").attr("data") ||
-        "",
+      $(".pagination a.next").first().attr("href") ||
+      $(".nextch").attr("data") ||
+      "",
     );
 
     // Cari index chapter saat ini
@@ -1399,10 +1399,10 @@ async function scrapeMangakuPustaka({ page = 1 } = {}) {
 
       const typeClass = $(el).find(".type").attr("class") || "";
 
-// hasil: "type Manga 18+"
-const typeGenre = typeClass
-  .replace("type", "")
-  .trim();
+      // hasil: "type Manga 18+"
+      const typeGenre = typeClass
+        .replace("type", "")
+        .trim();
 
 
       if (!title || !link) return;
@@ -1953,8 +1953,8 @@ function parseSekteListItems($) {
       "";
     const image = sekteNormalizeImageUrl(
       item.find(".limit img").first().attr("data-src") ||
-        item.find(".limit img").first().attr("src") ||
-        "",
+      item.find(".limit img").first().attr("src") ||
+      "",
     );
     const mangaSlug = sekteMangaSlug(detailPath);
     const typeGenre =
@@ -2095,8 +2095,8 @@ async function scrapeSekteDetail(slug) {
       article.find("h1.entry-title").first().text().replace(/\s+/g, " ").trim();
     const image = sekteNormalizeImageUrl(
       article.find(".thumb img").first().attr("data-src") ||
-        article.find(".thumb img").first().attr("src") ||
-        "",
+      article.find(".thumb img").first().attr("src") ||
+      "",
     );
     const alternativeTitle = article
       .find("#titlemove .alternative")
@@ -2359,7 +2359,7 @@ async function scrapeDoujindesuTerbaru({ page = 1, type = "doujinshi,manga,manhw
       const detailLink = `${DOUJINDESU_BASE_URL}/manga/${item.slug}`;
       const image = item.cover_url || "";
       const typeGenre = item.type || "Manga";
-      
+
       const latestChapter = item.chapters && item.chapters[0];
       const chapterTitle = latestChapter ? `Chapter ${latestChapter.chapter_number}` : "";
       const chapterSlug = latestChapter ? `${item.slug}-chapter-${latestChapter.chapter_number}` : "";
@@ -2428,7 +2428,7 @@ async function scrapeDoujindesuSearch(query, page = 1) {
 
       const detailLink = `${DOUJINDESU_BASE_URL}/manga/${item.slug}`;
       const image = item.cover_url || "";
-      
+
       const genres = (item.terms || "")
         .split(",")
         .map(term => {
@@ -2526,7 +2526,7 @@ async function scrapeDoujindesuDetail(slug) {
 
     const latestChapter = chapters[0] || null;
     const firstChapter = chapters[chapters.length - 1] || null;
-    
+
     // Ryukomik expects chapters ordered oldest to newest
     chapters.reverse();
 
@@ -2592,7 +2592,7 @@ async function scrapeDoujindesuChapter(slug) {
 
     const mangaSlug = item.manga_slug || (item.manga && item.manga.slug) || "";
     const mangaTitle = item.manga_title || (item.manga && item.manga.title) || "";
-    
+
     const chapterLink = `${DOUJINDESU_BASE_URL}/chapters/${item.id}`;
     const seriesLink = `${DOUJINDESU_BASE_URL}/manga/${mangaSlug}`;
 
@@ -2719,7 +2719,7 @@ async function scrapeMangakuDetail(url) {
         date,
       });
     });
-chapters.reverse();
+    chapters.reverse();
 
     return {
       success: true,
@@ -2929,8 +2929,8 @@ async function scrapeMeionovelsDetail(url) {
     const title = $(".post-title h1").text().trim();
     const image = $(".summary_image img").attr("src");
 
-    const synopsis = $("#editdescription").text().trim() 
-                     || $(".summary__content").text().trim();
+    const synopsis = $("#editdescription").text().trim()
+      || $(".summary__content").text().trim();
 
     const alternative = $(".post-content_item")
       .filter((i, el) => $(el).find("h5").text().includes("Alternative"))
@@ -3863,7 +3863,7 @@ app.get(
   ["/doujindesu/terbaru", "/doujindesu/pustaka", "/doujindesu/manhwa/terbaru"],
   async (req, res) => {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    
+
     // Determine target type dynamically
     let type = "doujinshi,manga,manhwa";
     if (req.path.includes("manhwa")) {
