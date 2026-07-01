@@ -183,6 +183,11 @@ function rewriteKiryuuImages(payload, req) {
 
   const rewritten = {};
   for (const [key, value] of Object.entries(payload)) {
+    if (key === "images" && Array.isArray(value)) {
+      rewritten[key] = value.map((img) => typeof img === "string" ? toKiryuuBackendImageUrl(img, req) : img);
+      continue;
+    }
+
     if ((key === "image" || key === "thumbnail") && typeof value === "string") {
       rewritten[key] = toKiryuuBackendImageUrl(value, req);
       continue;
@@ -3516,11 +3521,30 @@ app.get("/kiryuu/image", async (req, res) => {
   try {
     const imageUrl = getOriginalKiryuuImageUrl(req.query.url || "");
 
-    if (!imageUrl || !imageUrl.startsWith(`${KIRYUU_BASE_URL}/`)) {
+    let isAllowed = false;
+    try {
+      const parsedUrl = new URL(imageUrl);
+      const host = parsedUrl.hostname;
+      if (
+        host === "v6.kiryuu.to" ||
+        host.endsWith(".kiryuu.to") ||
+        host === "yuucdn.com" ||
+        host.endsWith(".yuucdn.com")
+      ) {
+        isAllowed = true;
+      }
+    } catch (e) {
+      isAllowed = false;
+    }
+
+    if (!imageUrl || !isAllowed) {
       return res.status(400).send("URL gambar Kiryuu tidak valid");
     }
 
-    const response = await axios.get(kiryuuProxyUrl(imageUrl) || imageUrl, {
+    const useProxy = imageUrl.startsWith(KIRYUU_BASE_URL);
+    const fetchUrl = useProxy ? (kiryuuProxyUrl(imageUrl) || imageUrl) : imageUrl;
+
+    const response = await axios.get(fetchUrl, {
       responseType: "stream",
       timeout: 30000,
       headers: {
