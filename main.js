@@ -13,6 +13,7 @@ app.use(cors({ origin: "*" }));
 // ANIMEID CONFIG
 // ─────────────────────────────────────────────────────────────────────────────
 const ANIMEID_BASE_URL = "https://s13.nontonanimeid.boats";
+const ANIMEID_PROXY_URL = process.env.ANIMEID_PROXY_URL || "https://proxy.kopipaitboskuh.workers.dev/?url=";
 
 const USER_AGENTS = [
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -59,8 +60,27 @@ async function fetchRetry(url, options = {}, retries = 2) {
       },
     });
   } catch (err) {
+    const isForbidden = err.response?.status === 403;
+    if (isForbidden && ANIMEID_PROXY_URL) {
+      console.log(`⚠️ Direct fetch 403 Forbidden. Trying proxy for: ${url}`);
+      try {
+        const proxyUrl = `${ANIMEID_PROXY_URL}${encodeURIComponent(url)}`;
+        return await axiosInstance.get(proxyUrl, {
+          ...options,
+          headers: {
+            ...options.headers,
+            "User-Agent": randomUA(),
+            Referer: ANIMEID_BASE_URL + "/",
+          },
+        });
+      } catch (proxyErr) {
+        console.error(`❌ Proxy fetch also failed: ${proxyErr.message}`);
+        if (retries <= 0) throw proxyErr;
+      }
+    }
+
     if (retries <= 0) throw err;
-    const delay = err.response?.status === 403 ? 1500 : 500;
+    const delay = isForbidden ? 1500 : 500;
     console.log(`🔁 Retry (${retries} left) [${err.response?.status || err.code}]: ${url}`);
     await sleep(delay);
     return fetchRetry(url, options, retries - 1);
@@ -453,19 +473,37 @@ async function scrapeNontonAnimeEpisode(url) {
         params.append("serverName", type.toLowerCase());
         params.append("nume", nume);
         params.append("post", post);
-        const { data } = await axios.post(ajaxUrl, params, {
-          timeout: 6000,
-          headers: {
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "User-Agent": randomUA(),
-            Origin: ANIMEID_BASE_URL,
-            Referer: url,
-            "X-Requested-With": "XMLHttpRequest",
-            Cookie: cookies,
-          },
-        });
-        return cheerio.load(data)("iframe").attr("src") || "";
+        
+        const headers = {
+          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+          "User-Agent": randomUA(),
+          Origin: ANIMEID_BASE_URL,
+          Referer: url,
+          "X-Requested-With": "XMLHttpRequest",
+          Cookie: cookies,
+        };
+
+        let response;
+        try {
+          response = await axios.post(ajaxUrl, params, {
+            timeout: 6000,
+            headers,
+          });
+        } catch (postErr) {
+          if (postErr.response?.status === 403 && ANIMEID_PROXY_URL) {
+            console.log(`⚠️ Direct getPlayer 403 Forbidden. Trying proxy for: ${ajaxUrl}`);
+            const proxiedUrl = `${ANIMEID_PROXY_URL}${encodeURIComponent(ajaxUrl)}`;
+            response = await axios.post(proxiedUrl, params, {
+              timeout: 8000,
+              headers,
+            });
+          } else {
+            throw postErr;
+          }
+        }
+        return cheerio.load(response.data)("iframe").attr("src") || "";
       } catch (err) {
+        console.error("getPlayer error:", err.message);
         return "";
       }
     }
@@ -1689,14 +1727,32 @@ app.get("/animeid/resolve-stream", async (req, res) => {
   if (!url) return res.status(400).send("url required");
 
   try {
-    const response = await axios.get(url, {
-      timeout: 20000,
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        Referer: "https://s13.nontonanimeid.boats/",
-      },
-    });
+    let response;
+    try {
+      response = await axios.get(url, {
+        timeout: 20000,
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          Referer: "https://s13.nontonanimeid.boats/",
+        },
+      });
+    } catch (err) {
+      if (err.response?.status === 403 && ANIMEID_PROXY_URL) {
+        console.log(`⚠️ Direct resolve-stream 403. Trying proxy for: ${url}`);
+        const proxiedUrl = `${ANIMEID_PROXY_URL}${encodeURIComponent(url)}`;
+        response = await axios.get(proxiedUrl, {
+          timeout: 20000,
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            Referer: "https://s13.nontonanimeid.boats/",
+          },
+        });
+      } else {
+        throw err;
+      }
+    }
 
     const html = response.data;
 
@@ -1734,14 +1790,32 @@ app.get("/animeid/video-proxy", async (req, res) => {
   if (!url) return res.status(400).send("url required");
 
   try {
-    const response = await axios.get(url, {
-      timeout: 20000,
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        Referer: "https://s13.nontonanimeid.boats/",
-      },
-    });
+    let response;
+    try {
+      response = await axios.get(url, {
+        timeout: 20000,
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          Referer: "https://s13.nontonanimeid.boats/",
+        },
+      });
+    } catch (err) {
+      if (err.response?.status === 403 && ANIMEID_PROXY_URL) {
+        console.log(`⚠️ Direct video-proxy 403. Trying proxy for: ${url}`);
+        const proxiedUrl = `${ANIMEID_PROXY_URL}${encodeURIComponent(url)}`;
+        response = await axios.get(proxiedUrl, {
+          timeout: 20000,
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            Referer: "https://s13.nontonanimeid.boats/",
+          },
+        });
+      } else {
+        throw err;
+      }
+    }
 
     let html = response.data;
 
