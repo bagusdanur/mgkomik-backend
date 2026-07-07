@@ -3548,7 +3548,7 @@ app.get("/kiryuu/image", async (req, res) => {
       return res.status(400).send("URL gambar Kiryuu tidak valid");
     }
 
-    const useProxy = imageUrl.startsWith(KIRYUU_BASE_URL);
+    const useProxy = imageUrl.startsWith(KIRYUU_BASE_URL) || imageUrl.includes("yuucdn.com") || imageUrl.includes("kiryuu");
     const fetchUrl = useProxy ? (kiryuuProxyUrl(imageUrl) || imageUrl) : imageUrl;
 
     const response = await axios.get(fetchUrl, {
