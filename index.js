@@ -135,10 +135,14 @@ function kiryuuUrl(path = "/") {
   return path.startsWith("http") ? path : `${KIRYUU_BASE_URL}${path}`;
 }
 
-function kiryuuProxyUrl(url) {
+function kiryuuProxyUrl(url, referer = `${KIRYUU_BASE_URL}/`) {
   if (!KIRYUU_PROXY_URL) return "";
   const separator = KIRYUU_PROXY_URL.includes("?") ? "" : "?url=";
-  return `${KIRYUU_PROXY_URL}${separator}${encodeURIComponent(url)}`;
+  let target = `${KIRYUU_PROXY_URL}${separator}${encodeURIComponent(url)}`;
+  if (referer) {
+    target += `&referer=${encodeURIComponent(referer)}`;
+  }
+  return target;
 }
 
 function toKiryuuProxyUrl(url) {
@@ -3548,14 +3552,13 @@ app.get("/kiryuu/image", async (req, res) => {
       return res.status(400).send("URL gambar Kiryuu tidak valid");
     }
 
-    const useProxy = imageUrl.startsWith(KIRYUU_BASE_URL);
-    const fetchUrl = useProxy ? (kiryuuProxyUrl(imageUrl) || imageUrl) : imageUrl;
+    const fetchUrl = kiryuuProxyUrl(imageUrl) || imageUrl;
 
     const response = await axios.get(fetchUrl, {
       responseType: "stream",
       timeout: 30000,
       headers: {
-        ...kiryuuHeaders(`${KIRYUU_BASE_URL}/`),
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
         Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
       },
     });
