@@ -175,7 +175,7 @@ function getOriginalKiryuuImageUrl(url = "") {
 function toKiryuuBackendImageUrl(url, req) {
   const originalUrl = getOriginalKiryuuImageUrl(url);
   if (!originalUrl) return "";
-  if (originalUrl.includes("yuucdn.com")) {
+  if (originalUrl.includes("yuucdn.com") && originalUrl.includes("/wp-content/uploads/images/")) {
     return `${getRequestBaseUrl(req)}/kiryuu/image?url=${encodeURIComponent(originalUrl)}`;
   }
   return originalUrl;
