@@ -175,7 +175,7 @@ function getOriginalKiryuuImageUrl(url = "") {
 function toKiryuuBackendImageUrl(url, req) {
   const originalUrl = getOriginalKiryuuImageUrl(url);
   if (!originalUrl) return "";
-  if (originalUrl.includes("yuucdn.com") && originalUrl.includes("/wp-content/uploads/images/")) {
+  if (originalUrl.includes("yuucdn.com")) {
     return `${getRequestBaseUrl(req)}/kiryuu/image?url=${encodeURIComponent(originalUrl)}`;
   }
   return originalUrl;
@@ -3548,16 +3548,13 @@ app.get("/kiryuu/image", async (req, res) => {
       return res.status(400).send("URL gambar Kiryuu tidak valid");
     }
 
-    const useProxy = imageUrl.startsWith(KIRYUU_BASE_URL) || imageUrl.includes("yuucdn.com") || imageUrl.includes("kiryuu");
+    const useProxy = imageUrl.startsWith(KIRYUU_BASE_URL);
     const fetchUrl = useProxy ? (kiryuuProxyUrl(imageUrl) || imageUrl) : imageUrl;
 
     const response = await axios.get(fetchUrl, {
       responseType: "stream",
       timeout: 30000,
-      headers: useProxy ? {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
-        Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-      } : {
+      headers: {
         ...kiryuuHeaders(`${KIRYUU_BASE_URL}/`),
         Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
       },
