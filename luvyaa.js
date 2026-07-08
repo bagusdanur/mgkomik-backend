@@ -129,7 +129,7 @@ async function scrapeLuvyaaPustaka({ page = 1 } = {}) {
           const chTime = $(ch).find("span.fivtime").text().trim();
           const isLocked = rawTitle.startsWith("🔒");
 
-          if (chLink && chTitle) {
+          if (chLink && chTitle && !isLocked) {
             chapters.push({
               title: chTitle,
               link: chLink,
@@ -231,6 +231,23 @@ async function scrapeLuvyaaDetail(url) {
       $(".entry-content").first().text().trim() ||
       "Tidak ada sinopsis.";
 
+    let lockedUrls = [];
+    const scriptTags = $("script").toArray();
+    for (const script of scriptTags) {
+      const scriptContent = $(script).html() || "";
+      if (scriptContent.includes("var lockedUrls")) {
+        const match = scriptContent.match(/var lockedUrls\s*=\s*(\[[^\]]*\]);/);
+        if (match && match[1]) {
+          try {
+            // Hilangkan backslash escaping sebelum parsing JSON
+            const unescaped = match[1].replace(/\\\//g, "/");
+            lockedUrls = JSON.parse(unescaped);
+          } catch (e) {}
+        }
+        break;
+      }
+    }
+
     const chapters = [];
     $("#chapterlist ul.clstyle li").each((_, el) => {
       const chLink = $(el).find("a").attr("href") || "";
@@ -238,7 +255,7 @@ async function scrapeLuvyaaDetail(url) {
       const chDate = $(el).find("span.chapterdate").text().trim();
       const chSlug = extractSlugFromUrl(chLink);
 
-      if (chLink && chTitle) {
+      if (chLink && chTitle && !lockedUrls.includes(chLink)) {
         chapters.push({
           title: chTitle,
           slug: chSlug,
