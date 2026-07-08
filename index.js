@@ -105,7 +105,7 @@ async function coalescedScrape(urlKey, scrapeFn) {
 
 const KIRYUU_BASE_URL = "https://v6.kiryuu.to";
 const KIRYUU_PROXY_URL =
-  process.env.KIRYUU_PROXY_URL || "https://proxy.kopipaitboskuh.workers.dev/?url=";
+  process.env.KIRYUU_PROXY_URL || "https://proxy.akunncoc992.workers.dev/?url=";
 
 function toKomikuWorkerImageUrl(imageUrl, req) {
   if (!imageUrl) return "";
