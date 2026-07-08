@@ -150,11 +150,21 @@ async function scrapeLuvyaaPustaka({ page = 1 } = {}) {
 
       if (!title || !link) return;
 
+      const slug = extractSlugFromUrl(link);
+      const latest = chapters[0] || {};
+      const oldest = chapters[chapters.length - 1] || {};
+
       results.push({
+        source: "luvyaa",
         title,
+        slug,
         image,
         detail_link: link,
+        description: "",
         type_genre: typeGenre,
+        info: latest.time || "",
+        chapter_awal: oldest.title || "",
+        chapter_terbaru: latest.title || "",
         chapters,
       });
     });
