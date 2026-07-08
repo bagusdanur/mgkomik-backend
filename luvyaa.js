@@ -89,13 +89,25 @@ function rewriteLuvyaaImages(payload, req) {
 // =====================================================
 // 📚 SCRAPER: PUSTAKA / LATEST UPDATES
 // =====================================================
+function translateTime(str) {
+  if (!str) return "";
+  return str
+    .replace(/seconds?/i, "detik")
+    .replace(/minutes?/i, "menit")
+    .replace(/hours?/i, "jam")
+    .replace(/days?/i, "hari")
+    .replace(/weeks?/i, "minggu")
+    .replace(/months?/i, "bulan")
+    .replace(/years?/i, "tahun")
+    .replace(/ago/i, "lalu");
+}
 
 async function scrapeLuvyaaPustaka({ page = 1 } = {}) {
   try {
     const url =
       page === 1
-        ? `${LUVYAA_BASE_URL}/`
-        : `${LUVYAA_BASE_URL}/page/${page}/`;
+        ? "https://v4.luvyaa.co/"
+        : `https://v4.luvyaa.co/page/${page}/`;
 
     console.log("🌸 Luvyaa pustaka URL:", url);
 
@@ -103,30 +115,27 @@ async function scrapeLuvyaaPustaka({ page = 1 } = {}) {
     const $ = cheerio.load(html);
     const results = [];
 
-    $(".project-update-box .bs, .bixbox .bs.stylefiv").each((_, el) => {
-      const link =
-        $(el).find("a[href]").first().attr("href") ||
-        $(el).find("div.tt > a").attr("href") ||
-        "";
+    $(".latest-update-box .utao, .listupd .utao").each((_, el) => {
+      const link = $(el).find("a.series").first().attr("href") || "";
       if (!link) return;
 
       const title =
-        $(el).find("div.tt").first().text().trim() ||
-        $(el).find("a[title]").first().attr("title") ||
+        $(el).find("a.series h4").first().text().trim() ||
+        $(el).find("a.series").first().attr("title") ||
         "";
 
-      const image = $(el).find("img.ts-post-image").first().attr("src") || "";
-      const slug = extractSlugFromUrl(link);
+      const image = $(el).find("div.imgu img").first().attr("src") || "";
       const typeGenre = extractTypeFromClass(el, $);
 
       const chapters = [];
       $(el)
-        .find("ul.chfiv li")
+        .find("ul li")
         .each((i, ch) => {
           const chLink = $(ch).find("a").attr("href") || "";
-          const rawTitle = $(ch).find("span.fivchap").text().trim();
+          const rawTitle = $(ch).find("a").text().trim();
           const chTitle = rawTitle.replace(/^🔒\s*/, "").trim();
-          const chTime = $(ch).find("span.fivtime").text().trim();
+          const rawTime = $(ch).find("span").text().trim();
+          const chTime = translateTime(rawTime);
           const isLocked = rawTitle.startsWith("🔒");
 
           if (chLink && chTitle && !isLocked) {
@@ -139,29 +148,20 @@ async function scrapeLuvyaaPustaka({ page = 1 } = {}) {
           }
         });
 
-      const latest = chapters[0] || {};
-      const oldest = chapters[chapters.length - 1] || {};
-
       if (!title || !link) return;
 
       results.push({
-        source: "luvyaa",
         title,
-        slug,
         image,
         detail_link: link,
-        description: "",
         type_genre: typeGenre,
-        info: latest.time || "",
-        chapter_awal: oldest.title || "",
-        chapter_terbaru: latest.title || "",
         chapters,
       });
     });
 
     let totalPages = 1;
     const pages = [];
-    $(".pagination a.page-numbers").each((_, el) => {
+    $(".pagination a.page-numbers, .hpage a").each((_, el) => {
       const text = $(el).text().trim();
       if (/^\d+$/.test(text)) pages.push(parseInt(text));
     });
