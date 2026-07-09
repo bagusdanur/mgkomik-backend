@@ -106,6 +106,8 @@ async function coalescedScrape(urlKey, scrapeFn) {
 const KIRYUU_BASE_URL = "https://v6.kiryuu.to";
 const KIRYUU_PROXY_URL =
   process.env.KIRYUU_PROXY_URL || "https://proxy.akunncoc992.workers.dev/?url=";
+const YUUCDN_PROXY_URL =
+  process.env.YUUCDN_PROXY_URL || "https://cdn.kopipaitboskuh.workers.dev";
 
 function toKomikuWorkerImageUrl(imageUrl, req) {
   if (!imageUrl) return "";
@@ -179,8 +181,10 @@ function getOriginalKiryuuImageUrl(url = "") {
 function toKiryuuBackendImageUrl(url, req) {
   const originalUrl = getOriginalKiryuuImageUrl(url);
   if (!originalUrl) return "";
+  // yuucdn.com: langsung return URL asli — browser user (residential IP) bisa load langsung
+  // VPS tidak bisa proxy yuucdn.com karena IP datacenter diblokir Cloudflare
   if (originalUrl.includes("yuucdn.com")) {
-    return `${getRequestBaseUrl(req)}/kiryuu/image?url=${encodeURIComponent(originalUrl)}`;
+    return originalUrl;
   }
   return originalUrl;
 }
@@ -3561,6 +3565,28 @@ app.get("/kiryuu/image", async (req, res) => {
     let imageBuffer;
     let contentType = "image/jpeg";
     const errors = [];
+    const isYuucdn = imageUrl.includes("yuucdn.com");
+
+    // === STRATEGI 0: Dedicated yuucdn Worker Proxy (khusus yuucdn.com) ===
+    if (isYuucdn && YUUCDN_PROXY_URL) {
+      try {
+        const yuucdnWorkerUrl = `${YUUCDN_PROXY_URL}${YUUCDN_PROXY_URL.includes("?") ? "&" : "?"}url=${encodeURIComponent(imageUrl)}&referer=${encodeURIComponent(KIRYUU_BASE_URL + "/")}`;
+        const response = await axios.get(yuucdnWorkerUrl, {
+          responseType: "arraybuffer",
+          timeout: 15000,
+        });
+        const ct = response.headers["content-type"] || "";
+        if (ct.startsWith("image/")) {
+          imageBuffer = response.data;
+          contentType = ct;
+          console.log(`[Kiryuu Proxy] ✅ Yuucdn Worker berhasil untuk ${imageUrl}`);
+        } else {
+          errors.push("yuucdn-worker:response-bukan-image");
+        }
+      } catch (err) {
+        errors.push(`yuucdn-worker:${err.response?.status || err.code || err.message}`);
+      }
+    }
 
     // === STRATEGI 1: Cloudflare Worker Proxy (paling reliable dari datacenter IP) ===
     const workerUrl = kiryuuProxyUrl(imageUrl);
