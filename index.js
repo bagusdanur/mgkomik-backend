@@ -3590,7 +3590,7 @@ app.get("/kiryuu/image", async (req, res) => {
     res.send(imageBuffer);
   } catch (err) {
     console.error("Kiryuu image proxy error:", err.message);
-    res.status(502).send("Gagal mengambil gambar Kiryuu");
+    res.status(502).send(`Gagal mengambil gambar Kiryuu: ${err.message}`);
   }
 });
 
