@@ -3552,8 +3552,6 @@ app.get("/kiryuu/image", async (req, res) => {
       return res.status(400).send("URL gambar Kiryuu tidak valid");
     }
 
-    const fetchUrl = imageUrl;
-
     const headers = {
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
       Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
@@ -3562,27 +3560,90 @@ app.get("/kiryuu/image", async (req, res) => {
 
     let imageBuffer;
     let contentType = "image/jpeg";
+    const errors = [];
 
-    try {
-      const response = await axios.get(fetchUrl, {
-        responseType: "arraybuffer",
-        timeout: 15000,
-        headers,
-      });
-      imageBuffer = response.data;
-      contentType = response.headers["content-type"] || "image/jpeg";
-    } catch (err) {
-      console.log(`[Kiryuu Proxy] Axios gagal, mencoba cloudscraper untuk ${fetchUrl}`);
-      imageBuffer = await cloudscraper.get({
-        uri: fetchUrl,
-        encoding: null,
-        timeout: 20000,
-        headers,
-      });
-      // Try to determine content type from URL since cloudscraper might not return it directly in this simple call
-      if (fetchUrl.endsWith(".png")) contentType = "image/png";
-      else if (fetchUrl.endsWith(".webp")) contentType = "image/webp";
-      else if (fetchUrl.endsWith(".gif")) contentType = "image/gif";
+    // === STRATEGI 1: Cloudflare Worker Proxy (paling reliable dari datacenter IP) ===
+    const workerUrl = kiryuuProxyUrl(imageUrl);
+    if (workerUrl) {
+      try {
+        const response = await axios.get(workerUrl, {
+          responseType: "arraybuffer",
+          timeout: 15000,
+          headers,
+        });
+        // Pastikan response bukan HTML (Cloudflare challenge)
+        const ct = response.headers["content-type"] || "";
+        if (ct.startsWith("image/")) {
+          imageBuffer = response.data;
+          contentType = ct;
+          console.log(`[Kiryuu Proxy] ✅ Worker proxy berhasil untuk ${imageUrl}`);
+        } else {
+          errors.push("worker:response-bukan-image");
+        }
+      } catch (err) {
+        errors.push(`worker:${err.response?.status || err.code || err.message}`);
+      }
+    }
+
+    // === STRATEGI 2: Direct fetch (jika IP tidak diblokir Cloudflare) ===
+    if (!imageBuffer) {
+      try {
+        const response = await axios.get(imageUrl, {
+          responseType: "arraybuffer",
+          timeout: 10000,
+          headers,
+        });
+        const ct = response.headers["content-type"] || "";
+        if (ct.startsWith("image/")) {
+          imageBuffer = response.data;
+          contentType = ct;
+          console.log(`[Kiryuu Proxy] ✅ Direct fetch berhasil untuk ${imageUrl}`);
+        } else {
+          errors.push("direct:response-bukan-image");
+        }
+      } catch (err) {
+        errors.push(`direct:${err.response?.status || err.code || err.message}`);
+      }
+    }
+
+    // === STRATEGI 3: Cloudscraper (bypass Cloudflare challenge) ===
+    if (!imageBuffer) {
+      try {
+        const csResult = await cloudscraper.get({
+          uri: imageUrl,
+          encoding: null,
+          timeout: 20000,
+          headers,
+        });
+        // Cek apakah response adalah gambar (bukan HTML challenge)
+        if (Buffer.isBuffer(csResult) && csResult.length > 1000) {
+          // Cek magic bytes: JPEG (FFD8), PNG (8950), WEBP (52494646), GIF (47494638)
+          const head = csResult.slice(0, 4);
+          const isImage = (head[0] === 0xFF && head[1] === 0xD8) ||  // JPEG
+                          (head[0] === 0x89 && head[1] === 0x50) ||  // PNG
+                          (head[0] === 0x52 && head[1] === 0x49) ||  // WEBP (RIFF)
+                          (head[0] === 0x47 && head[1] === 0x49);    // GIF
+          if (isImage) {
+            imageBuffer = csResult;
+            if (head[0] === 0xFF) contentType = "image/jpeg";
+            else if (head[0] === 0x89) contentType = "image/png";
+            else if (head[0] === 0x52) contentType = "image/webp";
+            else if (head[0] === 0x47) contentType = "image/gif";
+            console.log(`[Kiryuu Proxy] ✅ Cloudscraper berhasil untuk ${imageUrl}`);
+          } else {
+            errors.push("cloudscraper:response-bukan-image");
+          }
+        } else {
+          errors.push("cloudscraper:response-terlalu-kecil-atau-bukan-buffer");
+        }
+      } catch (err) {
+        errors.push(`cloudscraper:${err.message}`);
+      }
+    }
+
+    if (!imageBuffer) {
+      console.error(`[Kiryuu Proxy] ❌ Semua strategi gagal untuk ${imageUrl}: ${errors.join(" -> ")}`);
+      return res.status(502).send(`Gagal mengambil gambar: ${errors.join(" -> ")}`);
     }
 
     res.set("Content-Type", contentType);
