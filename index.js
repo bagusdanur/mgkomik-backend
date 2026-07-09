@@ -3554,26 +3554,40 @@ app.get("/kiryuu/image", async (req, res) => {
 
     const fetchUrl = imageUrl;
 
-    const response = await axios.get(fetchUrl, {
-      responseType: "stream",
-      timeout: 30000,
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
-        Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-        Referer: `${KIRYUU_BASE_URL}/`,
-      },
-    });
+    const headers = {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+      Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+      Referer: `${KIRYUU_BASE_URL}/`,
+    };
 
-    // Hancurkan stream jika koneksi client terputus sebelum gambar selesai diunduh
-    req.on("close", () => {
-      if (response && response.data && !response.data.destroyed) {
-        response.data.destroy();
-      }
-    });
+    let imageBuffer;
+    let contentType = "image/jpeg";
 
-    res.set("Content-Type", response.headers["content-type"] || "image/jpeg");
+    try {
+      const response = await axios.get(fetchUrl, {
+        responseType: "arraybuffer",
+        timeout: 15000,
+        headers,
+      });
+      imageBuffer = response.data;
+      contentType = response.headers["content-type"] || "image/jpeg";
+    } catch (err) {
+      console.log(`[Kiryuu Proxy] Axios gagal, mencoba cloudscraper untuk ${fetchUrl}`);
+      imageBuffer = await cloudscraper.get({
+        uri: fetchUrl,
+        encoding: null,
+        timeout: 20000,
+        headers,
+      });
+      // Try to determine content type from URL since cloudscraper might not return it directly in this simple call
+      if (fetchUrl.endsWith(".png")) contentType = "image/png";
+      else if (fetchUrl.endsWith(".webp")) contentType = "image/webp";
+      else if (fetchUrl.endsWith(".gif")) contentType = "image/gif";
+    }
+
+    res.set("Content-Type", contentType);
     res.set("Cache-Control", "public, max-age=86400, s-maxage=86400");
-    response.data.pipe(res);
+    res.send(imageBuffer);
   } catch (err) {
     console.error("Kiryuu image proxy error:", err.message);
     res.status(502).send("Gagal mengambil gambar Kiryuu");
