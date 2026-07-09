@@ -3552,7 +3552,7 @@ app.get("/kiryuu/image", async (req, res) => {
       return res.status(400).send("URL gambar Kiryuu tidak valid");
     }
 
-    const fetchUrl = kiryuuProxyUrl(imageUrl) || imageUrl;
+    const fetchUrl = imageUrl;
 
     const response = await axios.get(fetchUrl, {
       responseType: "stream",
@@ -3560,6 +3560,7 @@ app.get("/kiryuu/image", async (req, res) => {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
         Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        Referer: `${KIRYUU_BASE_URL}/`,
       },
     });
 
