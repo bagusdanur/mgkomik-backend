@@ -106,7 +106,7 @@ function getRequestBaseUrl(req) {
 
 function toLuvyaaBackendImageUrl(url, req) {
   if (!url) return "";
-  return url;
+  return `${getRequestBaseUrl(req)}/luvyaa/image?url=${encodeURIComponent(url)}`;
 }
 
 function rewriteLuvyaaImages(payload, req) {
@@ -506,26 +506,67 @@ module.exports = function registerLuvyaaRoutes(app, { getCache, setCache, coales
 
     try {
       const decodedUrl = decodeURIComponent(url);
-      
-      const response = await axios.get(decodedUrl, {
-        headers: {
-          "Referer": LUVYAA_BASE_URL + "/",
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        },
-        responseType: "stream",
-        timeout: 20000,
-      });
+      const headers = luvyaaHeaders(LUVYAA_BASE_URL + "/");
+      let imageBuffer, contentType;
+      const errors = [];
+
+      // Strategi 1: Worker proxy
+      const WORKER_PROXY = process.env.LUVYAA_PROXY_URL || "https://proxy.akunncoc992.workers.dev/";
+      if (WORKER_PROXY) {
+        try {
+          const workerUrl = `${WORKER_PROXY}${WORKER_PROXY.includes("?") ? "&" : "?"}url=${encodeURIComponent(decodedUrl)}&referer=${encodeURIComponent(LUVYAA_BASE_URL + "/")}`;
+          const response = await axios.get(workerUrl, {
+            responseType: "arraybuffer",
+            timeout: 15000,
+          });
+          const ct = response.headers["content-type"] || "";
+          if (ct.startsWith("image/")) {
+            imageBuffer = response.data;
+            contentType = ct;
+            console.log(`[Luvyaa Proxy] ✅ Worker proxy berhasil untuk ${decodedUrl}`);
+          } else {
+            errors.push("worker:bukan-image");
+          }
+        } catch (err) {
+          errors.push(`worker:${err.response?.status || err.message}`);
+        }
+      }
+
+      // Strategi 2: Direct Axios
+      if (!imageBuffer) {
+        try {
+          const response = await axios.get(decodedUrl, {
+            headers,
+            responseType: "arraybuffer",
+            timeout: 15000,
+          });
+          const ct = response.headers["content-type"] || "";
+          if (ct.startsWith("image/")) {
+            imageBuffer = response.data;
+            contentType = ct;
+            console.log(`[Luvyaa Proxy] ✅ Direct axios berhasil untuk ${decodedUrl}`);
+          } else {
+            errors.push("direct:bukan-image");
+          }
+        } catch (err) {
+          errors.push(`direct:${err.response?.status || err.message}`);
+        }
+      }
+
+      if (!imageBuffer) {
+        console.error(`[Luvyaa Proxy Error] Gagal fetch image: ${errors.join(" -> ")}`);
+        return res.status(502).send("Gagal mengambil gambar dari sumber Luvyaa");
+      }
 
       res.set({
-        "Content-Type": response.headers["content-type"],
-        "Content-Length": response.headers["content-length"],
+        "Content-Type": contentType,
+        "Content-Length": imageBuffer.length,
         "Cache-Control": "public, max-age=31536000",
       });
-
-      response.data.pipe(res);
+      res.send(imageBuffer);
     } catch (err) {
-      console.error(`[Luvyaa Proxy Error] URL: ${url} | Error: ${err.message}`);
-      res.status(err.response?.status || 500).send(err.message);
+      console.error(`[Luvyaa Proxy Error] Fatal: ${err.message}`);
+      res.status(500).send(err.message);
     }
   });
 
