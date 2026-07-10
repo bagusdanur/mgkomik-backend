@@ -29,13 +29,61 @@ function luvyaaHeaders(referer = LUVYAA_BASE_URL + "/") {
   };
 }
 
+const cloudscraper = require("cloudscraper");
+
+function isCloudflareChallenge(html = "") {
+  return /Just a moment|cf_chl|challenge-platform|Enable JavaScript and cookies/i.test(
+    String(html),
+  );
+}
+
 async function luvyaaFetch(url, options = {}) {
   const fullUrl = url.startsWith("http") ? url : `${LUVYAA_BASE_URL}${url}`;
-  const { data } = await axios.get(fullUrl, {
-    headers: luvyaaHeaders(options.referer || LUVYAA_BASE_URL + "/"),
-    timeout: options.timeout || 20000,
-  });
-  return data;
+  const headers = luvyaaHeaders(options.referer || LUVYAA_BASE_URL + "/");
+  const timeout = options.timeout || 20000;
+  const errors = [];
+
+  // Strategi 1: Axios direct
+  try {
+    const { data } = await axios.get(fullUrl, { headers, timeout });
+    if (typeof data === "string" && !isCloudflareChallenge(data)) {
+      return data;
+    }
+    errors.push("axios:cloudflare-challenge");
+  } catch (err) {
+    errors.push(`axios:${err.response?.status || err.code || err.message}`);
+  }
+
+  // Strategi 2: Cloudscraper
+  try {
+    const html = await cloudscraper.get({ uri: fullUrl, headers, timeout });
+    if (typeof html === "string" && html.trim() && !isCloudflareChallenge(html)) {
+      console.log(`[Luvyaa] ✅ Cloudscraper berhasil untuk ${fullUrl}`);
+      return html;
+    }
+    errors.push("cloudscraper:cloudflare-challenge");
+  } catch (err) {
+    errors.push(`cloudscraper:${err.message}`);
+  }
+
+  // Strategi 3: Worker proxy (cdn.kopipaitboskuh.workers.dev)
+  const WORKER_PROXY = process.env.YUUCDN_PROXY_URL || "https://cdn.kopipaitboskuh.workers.dev";
+  if (WORKER_PROXY) {
+    try {
+      const workerUrl = `${WORKER_PROXY}${WORKER_PROXY.includes("?") ? "&" : "?"}url=${encodeURIComponent(fullUrl)}&referer=${encodeURIComponent(LUVYAA_BASE_URL + "/")}`;
+      const { data } = await axios.get(workerUrl, { timeout });
+      if (typeof data === "string" && !isCloudflareChallenge(data)) {
+        console.log(`[Luvyaa] ✅ Worker proxy berhasil untuk ${fullUrl}`);
+        return data;
+      }
+      errors.push("worker:cloudflare-challenge");
+    } catch (err) {
+      errors.push(`worker:${err.response?.status || err.code || err.message}`);
+    }
+  }
+
+  console.error(`[Luvyaa] ❌ Semua strategi gagal untuk ${fullUrl}: ${errors.join(" -> ")}`);
+  throw new Error(`Luvyaa fetch gagal: ${errors.join(" -> ")}`);
 }
 
 function extractSlugFromUrl(url = "") {
