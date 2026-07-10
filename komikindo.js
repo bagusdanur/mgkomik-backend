@@ -106,7 +106,8 @@ function getRequestBaseUrl(req) {
 
 function toBackendImageUrl(url, req) {
   if (!url) return "";
-  return `${getRequestBaseUrl(req)}/komikid/image?url=${encodeURIComponent(url)}`;
+  // Menggunakan URL gambar secara langsung tanpa proxy, pastikan menggunakan HTTPS
+  return url.replace(/^http:\/\//i, "https://");
 }
 
 function rewriteImages(payload, req) {
