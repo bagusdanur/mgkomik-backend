@@ -164,7 +164,15 @@ async function scrapePustaka({ page = 1 } = {}) {
     const $ = cheerio.load(html);
     const results = [];
 
-    $(".listupd .uta, .listupd .bs").each((_, el) => {
+    let elements = $(".bixbox:has(.releases) .listupd .uta, .bixbox:has(.releases) .listupd .bs");
+    if (elements.length === 0) {
+      elements = $(".postbody > .bixbox").last().find(".listupd .uta, .listupd .bs");
+    }
+    if (elements.length === 0) {
+      elements = $(".listupd .uta, .listupd .bs");
+    }
+
+    elements.each((_, el) => {
       const link = $(el).find("a.series").first().attr("href") || $(el).find("a").first().attr("href") || "";
       if (!link) return;
 
@@ -179,7 +187,7 @@ async function scrapePustaka({ page = 1 } = {}) {
       if (image.startsWith("data:image")) {
         image = $(el).find("noscript img").first().attr("src") || image;
       }
-      const typeGenre = extractTypeFromClass(el, $) || $(el).find('ul').attr('class') || "";
+      const typeGenre = extractTypeFromClass(el, $) || $(el).find('ul').attr('class') || $(el).find('.typename').text().trim() || "";
 
       const chapters = [];
       $(el)
@@ -215,6 +223,7 @@ async function scrapePustaka({ page = 1 } = {}) {
       const slug = extractSlugFromUrl(link);
       const latest = chapters[0] || {};
       const oldest = chapters[chapters.length - 1] || {};
+      const score = $(el).find(".numscore").text().trim();
 
       results.push({
         source: "komikindo",
@@ -224,7 +233,7 @@ async function scrapePustaka({ page = 1 } = {}) {
         detail_link: link,
         description: "",
         type_genre: typeGenre,
-        info: latest.time || "",
+        info: latest.time || (score ? `⭐ ${score}` : ""),
         chapter_awal: oldest.title || "",
         chapter_terbaru: latest.title || "",
         chapters,
@@ -482,7 +491,7 @@ async function scrapeSearch(query) {
       if (image.startsWith("data:image")) {
         image = $(el).find("noscript img").first().attr("src") || image;
       }
-      const typeGenre = extractTypeFromClass(el, $) || $(el).find('ul').attr('class') || "";
+      const typeGenre = extractTypeFromClass(el, $) || $(el).find('ul').attr('class') || $(el).find('.typename').text().trim() || "";
 
       const statusEl = $(el).find("span.status").length ? $(el).find("span.status") : $(el).find(".epx");
       const statusText = statusEl.text().trim();
