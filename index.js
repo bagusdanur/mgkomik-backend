@@ -4501,6 +4501,7 @@ app.get("/meionovels/detail/:slug", async (req, res) => {
 });
 
 require("./luvyaa")(app, { getCache, setCache, coalescedScrape });
+require("./komikindo")(app, { getCache, setCache, coalescedScrape });
 require("./asura")(app, { getCache, setCache, coalescedScrape });
 
 app.listen(PORT, () =>
