@@ -181,10 +181,9 @@ function getOriginalKiryuuImageUrl(url = "") {
 function toKiryuuBackendImageUrl(url, req) {
   const originalUrl = getOriginalKiryuuImageUrl(url);
   if (!originalUrl) return "";
-  // Kembalikan proxy karena yuucdn.com ternyata menggunakan hotlink protection
-  // yang mengembalikan gambar peringatan jika di-load tanpa referer v6.kiryuu.to
+  // yuucdn.com dimatikan proxynya sesuai permintaan (menghindari error 502)
   if (originalUrl.includes("yuucdn.com")) {
-    return `${getRequestBaseUrl(req)}/kiryuu/image?url=${encodeURIComponent(originalUrl)}`;
+    return originalUrl;
   }
   return originalUrl;
 }
