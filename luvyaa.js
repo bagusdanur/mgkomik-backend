@@ -66,8 +66,8 @@ async function luvyaaFetch(url, options = {}) {
     errors.push(`cloudscraper:${err.message}`);
   }
 
-  // Strategi 3: Worker proxy (cdn.kopipaitboskuh.workers.dev)
-  const WORKER_PROXY = process.env.YUUCDN_PROXY_URL || "https://cdn.kopipaitboskuh.workers.dev";
+  // Strategi 3: Worker proxy (akunncoc992)
+  const WORKER_PROXY = process.env.LUVYAA_PROXY_URL || "https://proxy.akunncoc992.workers.dev/";
   if (WORKER_PROXY) {
     try {
       const workerUrl = `${WORKER_PROXY}${WORKER_PROXY.includes("?") ? "&" : "?"}url=${encodeURIComponent(fullUrl)}&referer=${encodeURIComponent(LUVYAA_BASE_URL + "/")}`;

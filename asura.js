@@ -267,9 +267,9 @@ async function scrapeAsuraChapter(seriesSlug, chapterSlug) {
 // 🔍 SCRAPER: SEARCH
 // =====================================================
 
-async function scrapeAsuraSearch(query) {
+async function scrapeAsuraSearch(query, page = 1) {
   try {
-    const url = `/series?page=1&per_page=30&search=${encodeURIComponent(query)}`;
+    const url = `/series?page=${page}&per_page=20&search=${encodeURIComponent(query)}`;
     console.log("⚡ Asura search API:", url);
 
     const response = await asuraFetch(url);
@@ -292,18 +292,24 @@ async function scrapeAsuraSearch(query) {
       }
     }
 
+    const totalPages = response.meta?.last_page || Math.ceil((response.meta?.total || 0) / 20) || 1;
+
     return {
       success: true,
-      total: results.length,
       query,
+      meta: {
+        currentPage: page,
+        totalPages: totalPages,
+        totalItems: response.meta?.total || results.length,
+      },
       data: results,
     };
   } catch (err) {
     console.error("❌ Asura search error:", err.message);
     return {
       success: true,
-      total: 0,
       query,
+      meta: { currentPage: page, totalPages: 1, totalItems: 0 },
       data: [],
       warning: "Gagal melakukan pencarian Asura Scans",
     };
@@ -458,11 +464,13 @@ module.exports = function registerAsuraRoutes(app, { getCache, setCache, coalesc
   // ── SEARCH ──────────────────────────────────────────
   app.get("/asura/search", async (req, res) => {
     const { q } = req.query;
+    const page = parseInt(req.query.page) || 1;
+
     if (!q) {
       return res.status(400).json({ success: false, message: "Masukkan parameter ?q=" });
     }
 
-    const cacheKey = `asura:search:${q}`;
+    const cacheKey = `asura:search:${q}:p:${page}`;
     const cached = getCache(cacheKey);
     if (cached) {
       console.log(`⚡ [Cache Hit] ${cacheKey}`);
@@ -471,7 +479,7 @@ module.exports = function registerAsuraRoutes(app, { getCache, setCache, coalesc
 
     try {
       const responseData = await coalescedScrape(cacheKey, async () => {
-        const result = await scrapeAsuraSearch(q);
+        const result = await scrapeAsuraSearch(q, page);
         if (result.success && result.data) {
            result.data = rewriteAsuraImages(result.data, req);
         }
@@ -484,8 +492,8 @@ module.exports = function registerAsuraRoutes(app, { getCache, setCache, coalesc
       console.error("❌ Asura search route error:", err.message);
       res.status(200).json({
         success: true,
-        total: 0,
         query: q,
+        meta: { currentPage: page, totalPages: 1, totalItems: 0 },
         data: [],
         warning: "Gagal search Asura Scans",
       });
