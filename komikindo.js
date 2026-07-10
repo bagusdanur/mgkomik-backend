@@ -164,14 +164,22 @@ async function scrapePustaka({ page = 1 } = {}) {
     const $ = cheerio.load(html);
     const results = [];
 
-    let elements = $(".bixbox:has(.releases) .listupd .uta, .bixbox:has(.releases) .listupd .bs");
-    if (elements.length === 0) {
-      elements = $(".postbody > .bixbox").last().find(".listupd .uta, .listupd .bs");
+    let container = null;
+    $(".bixbox").each((_, el) => {
+      const heading = $(el).find(".releases h2, .releases h3").text().trim().toLowerCase();
+      if (heading.includes("latest update") || heading.includes("terbaru") || heading.includes("update terbaru")) {
+        container = $(el);
+      }
+    });
+
+    if (!container || container.length === 0) {
+      container = $(".postbody > .bixbox").last();
     }
-    if (elements.length === 0) {
-      elements = $(".listupd .uta, .listupd .bs");
+    if (!container || container.length === 0) {
+      container = $("body");
     }
 
+    const elements = container.find(".listupd .uta, .listupd .bs");
     elements.each((_, el) => {
       const link = $(el).find("a.series").first().attr("href") || $(el).find("a").first().attr("href") || "";
       if (!link) return;
