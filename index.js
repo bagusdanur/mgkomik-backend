@@ -1195,6 +1195,15 @@ async function scrapeKomikuPustaka(page = 1) {
         .text()
         .trim();
 
+      let extractedTime = readerInfo;
+      const infoParts = readerInfo.split("|").map(s => s.trim());
+      const timePart = infoParts.find(p => /lalu|detik|menit|jam|hari|minggu|bulan/i.test(p));
+      if (timePart) {
+        extractedTime = timePart;
+      } else if (infoParts.length > 1) {
+        extractedTime = infoParts[1];
+      }
+
       if (!title || !link) return;
 
       results.push({
@@ -1204,7 +1213,7 @@ async function scrapeKomikuPustaka(page = 1) {
         detail_link: link,
         description,
         type_genre: typeGenre,
-        info: readerInfo,
+        info: extractedTime,
         chapter_awal: chapterAwal,
         chapter_terbaru: chapterTerbaru,
       });
@@ -1307,7 +1316,15 @@ async function scrapeKomikuPustakaFilter({
 
       const description = $(el).find(".kan p").text().trim();
       const typeGenre = $(el).find(".tpe1_inf").text().trim();
-      const info = $(el).find(".judul2").text().trim().split("|")[1]?.trim();
+      const rawInfo = $(el).find(".judul2").text().trim();
+      let info = rawInfo;
+      const infoParts = rawInfo.split("|").map(s => s.trim());
+      const timePart = infoParts.find(p => /lalu|detik|menit|jam|hari|minggu|bulan/i.test(p));
+      if (timePart) {
+        info = timePart;
+      } else if (infoParts.length > 1) {
+        info = infoParts[1];
+      }
 
       const chapterAwal = $(el)
         .find(".new1")
