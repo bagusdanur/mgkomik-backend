@@ -173,7 +173,11 @@ async function scrapePustaka({ page = 1 } = {}) {
         $(el).find(".tt").first().text().trim() ||
         "";
 
-      const image = $(el).find("img").first().attr("src") || $(el).find("img").first().attr("data-src") || "";
+      const imgEl = $(el).find("img").first();
+      let image = imgEl.attr("data-src") || imgEl.attr("data-lazy-src") || imgEl.attr("src") || "";
+      if (image.startsWith("data:image")) {
+        image = $(el).find("noscript img").first().attr("src") || image;
+      }
       const typeGenre = extractTypeFromClass(el, $) || $(el).find('ul').attr('class') || "";
 
       const chapters = [];
@@ -264,10 +268,11 @@ async function scrapeDetail(url) {
     const $ = cheerio.load(html);
 
     const title = $("h1.entry-title").first().text().trim();
-    const thumbnail =
-      $("img.wp-post-image").first().attr("src") ||
-      $("div.thumb img").first().attr("src") ||
-      "";
+    const thumbnailEl = $("img.wp-post-image").first().length ? $("img.wp-post-image").first() : $("div.thumb img").first();
+    let thumbnail = thumbnailEl.attr("data-src") || thumbnailEl.attr("data-lazy-src") || thumbnailEl.attr("src") || "";
+    if (thumbnail.startsWith("data:image")) {
+      thumbnail = $("noscript img.wp-post-image").first().attr("src") || thumbnail;
+    }
 
     const status = $(".imptdt:contains('Status') i").first().text().trim() || $("span.status-text").first().text().trim();
 
@@ -471,7 +476,11 @@ async function scrapeSearch(query) {
         $(el).find("a[title]").first().attr("title") ||
         "";
 
-      const image = $(el).find("img").first().attr("src") || $(el).find("img").first().attr("data-src") || "";
+      const imgEl = $(el).find("img").first();
+      let image = imgEl.attr("data-src") || imgEl.attr("data-lazy-src") || imgEl.attr("src") || "";
+      if (image.startsWith("data:image")) {
+        image = $(el).find("noscript img").first().attr("src") || image;
+      }
       const typeGenre = extractTypeFromClass(el, $) || $(el).find('ul').attr('class') || "";
 
       const statusEl = $(el).find("span.status").length ? $(el).find("span.status") : $(el).find(".epx");
