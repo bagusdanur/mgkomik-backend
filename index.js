@@ -181,10 +181,10 @@ function getOriginalKiryuuImageUrl(url = "") {
 function toKiryuuBackendImageUrl(url, req) {
   const originalUrl = getOriginalKiryuuImageUrl(url);
   if (!originalUrl) return "";
-  // yuucdn.com: langsung return URL asli — browser user (residential IP) bisa load langsung
-  // VPS tidak bisa proxy yuucdn.com karena IP datacenter diblokir Cloudflare
+  // Kembalikan proxy karena yuucdn.com ternyata menggunakan hotlink protection
+  // yang mengembalikan gambar peringatan jika di-load tanpa referer v6.kiryuu.to
   if (originalUrl.includes("yuucdn.com")) {
-    return originalUrl;
+    return `${getRequestBaseUrl(req)}/kiryuu/image?url=${encodeURIComponent(originalUrl)}`;
   }
   return originalUrl;
 }
