@@ -106,7 +106,7 @@ function getRequestBaseUrl(req) {
 
 function toLuvyaaBackendImageUrl(url, req) {
   if (!url) return "";
-  return `${getRequestBaseUrl(req)}/luvyaa/image?url=${encodeURIComponent(url)}`;
+  return url;
 }
 
 function rewriteLuvyaaImages(payload, req) {
