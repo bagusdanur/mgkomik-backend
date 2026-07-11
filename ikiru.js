@@ -10,8 +10,7 @@ function getRequestBaseUrl(req) {
 
 function toIkiruBackendImageUrl(url, req) {
   if (!url) return "";
-  // Tembak langsung ke Worker dari browser frontend agar tidak memakan bandwidth VPS
-  return `${WORKER_PROXY}${WORKER_PROXY.includes("?") ? "&" : "?"}url=${encodeURIComponent(url)}&referer=${encodeURIComponent(IKIRU_BASE_URL + "/")}`;
+  return `${getRequestBaseUrl(req)}/ikiru/image?url=${encodeURIComponent(url)}`;
 }
 
 async function fetchIkiruHtml(urlPath) {
@@ -35,11 +34,17 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
 
     try {
       const decodedUrl = decodeURIComponent(url);
-      const workerUrl = `${WORKER_PROXY}${WORKER_PROXY.includes("?") ? "&" : "?"}url=${encodeURIComponent(decodedUrl)}&referer=${encodeURIComponent(IKIRU_BASE_URL + "/")}`;
       
-      const response = await axios.get(workerUrl, {
+      // Fetch gambar LANGSUNG dari VPS, TANPA WORKER. 
+      // Karena Cloudflare Ikiru tidak memblokir file gambar static (.jpg/.png), 
+      // yang penting header Referer dikosongkan agar lolos dari hotlink protection.
+      const response = await axios.get(decodedUrl, {
         responseType: "arraybuffer",
         timeout: 15000,
+        headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "" // Kosongkan referer untuk bypass Anti-Leech
+        }
       });
 
       const ct = response.headers["content-type"] || "image/jpeg";
