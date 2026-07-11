@@ -80,17 +80,44 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
         const data = [];
         const seenUrls = new Set();
 
-        $('a').each((i, el) => {
-          const href = $(el).attr('href');
-          if (href && href.includes('/manga/') && !href.includes('chapter-') && !seenUrls.has(href)) {
+        $('.flex.items-start.gap-4').each((i, el) => {
+          const detailLinkEl = $(el).find('a[href*="/manga/"]').first();
+          const href = detailLinkEl.attr('href');
+          
+          if (href && !href.includes('chapter-') && !seenUrls.has(href)) {
             seenUrls.add(href);
             
-            const container = $(el).parent();
-            const title = $(el).attr('title') || container.find('img').attr('alt') || $(el).text().trim();
-            const img = container.find('img').attr('src') || $(el).find('img').attr('src') || "";
+            const title = $(el).find('.flex-col > a.font-medium').text().trim() || detailLinkEl.attr('title') || "";
+            const img = detailLinkEl.find('img').first().attr('src') || "";
             
+            let type_genre = "";
+            detailLinkEl.find('img').each((idx, imgEl) => {
+               const alt = $(imgEl).attr('alt') || "";
+               if(alt.toLowerCase() === 'manhwa' || alt.toLowerCase() === 'manga' || alt.toLowerCase() === 'manhua') {
+                   type_genre = alt;
+               }
+            });
+
             const parts = href.split('/').filter(Boolean);
             const slug = parts[parts.length - 1];
+
+            const chapters = [];
+            $(el).find('.flex-col a[href*="chapter-"]').each((idx, chEl) => {
+                const chLink = $(chEl).attr('href');
+                const chTitle = $(chEl).find('p').text().trim() || $(chEl).text().trim();
+                const chTime = $(chEl).find('time').text().trim() || "";
+                if(chLink && chTitle) {
+                    chapters.push({
+                        title: chTitle,
+                        link: chLink,
+                        time: chTime,
+                        locked: false
+                    });
+                }
+            });
+
+            const latest = chapters[0] || {};
+            const oldest = chapters[chapters.length - 1] || {};
 
             if (title && slug) {
               data.push({
@@ -100,21 +127,54 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
                 image: img,
                 detail_link: href,
                 description: "",
-                type_genre: "", // Ikiru home doesn't show type easily
-                info: "",
-                chapter_awal: "",
-                chapter_terbaru: "",
-                chapters: []
+                type_genre: type_genre || "Manga", // fallback
+                info: latest.time || "",
+                chapter_awal: oldest.title || "",
+                chapter_terbaru: latest.title || "",
+                chapters
               });
             }
           }
         });
 
+        // Backup for homepage carousel items (if no latest updates block found)
+        if (data.length === 0) {
+            $('a').each((i, el) => {
+              const href = $(el).attr('href');
+              if (href && href.includes('/manga/') && !href.includes('chapter-') && !seenUrls.has(href)) {
+                seenUrls.add(href);
+                
+                const container = $(el).parent();
+                const title = $(el).attr('title') || container.find('img').attr('alt') || $(el).text().trim();
+                const img = container.find('img').attr('src') || $(el).find('img').attr('src') || "";
+                
+                const parts = href.split('/').filter(Boolean);
+                const slug = parts[parts.length - 1];
+
+                if (title && slug) {
+                  data.push({
+                    source: "ikiru.wtf",
+                    title,
+                    slug,
+                    image: img,
+                    detail_link: href,
+                    description: "",
+                    type_genre: "",
+                    info: "",
+                    chapter_awal: "",
+                    chapter_terbaru: "",
+                    chapters: []
+                  });
+                }
+              }
+            });
+        }
+
         const result = {
           success: true,
           meta: {
             currentPage: page,
-            totalPages: page + 1, // Estimate since pagination is tricky on Ikiru
+            totalPages: page + 1,
             totalItems: data.length,
           },
           data,
@@ -320,17 +380,44 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
         const data = [];
         const seenUrls = new Set();
 
-        $('a').each((i, el) => {
-          const href = $(el).attr('href');
-          if (href && href.includes('/manga/') && !href.includes('chapter-') && !seenUrls.has(href)) {
+        $('.flex.items-start.gap-4').each((i, el) => {
+          const detailLinkEl = $(el).find('a[href*="/manga/"]').first();
+          const href = detailLinkEl.attr('href');
+          
+          if (href && !href.includes('chapter-') && !seenUrls.has(href)) {
             seenUrls.add(href);
             
-            const container = $(el).parent();
-            const title = $(el).attr('title') || container.find('img').attr('alt') || $(el).text().trim();
-            const img = container.find('img').attr('src') || $(el).find('img').attr('src') || "";
+            const title = $(el).find('.flex-col > a.font-medium').text().trim() || detailLinkEl.attr('title') || "";
+            const img = detailLinkEl.find('img').first().attr('src') || "";
             
+            let type_genre = "";
+            detailLinkEl.find('img').each((idx, imgEl) => {
+               const alt = $(imgEl).attr('alt') || "";
+               if(alt.toLowerCase() === 'manhwa' || alt.toLowerCase() === 'manga' || alt.toLowerCase() === 'manhua') {
+                   type_genre = alt;
+               }
+            });
+
             const parts = href.split('/').filter(Boolean);
             const slug = parts[parts.length - 1];
+
+            const chapters = [];
+            $(el).find('.flex-col a[href*="chapter-"]').each((idx, chEl) => {
+                const chLink = $(chEl).attr('href');
+                const chTitle = $(chEl).find('p').text().trim() || $(chEl).text().trim();
+                const chTime = $(chEl).find('time').text().trim() || "";
+                if(chLink && chTitle) {
+                    chapters.push({
+                        title: chTitle,
+                        link: chLink,
+                        time: chTime,
+                        locked: false
+                    });
+                }
+            });
+
+            const latest = chapters[0] || {};
+            const oldest = chapters[chapters.length - 1] || {};
 
             if (title && slug) {
               data.push({
@@ -340,15 +427,48 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
                 image: img,
                 detail_link: href,
                 description: "",
-                type_genre: "",
-                info: "",
-                chapter_awal: "",
-                chapter_terbaru: "",
-                chapters: []
+                type_genre: type_genre || "Manga", // fallback
+                info: latest.time || "",
+                chapter_awal: oldest.title || "",
+                chapter_terbaru: latest.title || "",
+                chapters
               });
             }
           }
         });
+
+        // Backup fallback
+        if (data.length === 0) {
+            $('a').each((i, el) => {
+              const href = $(el).attr('href');
+              if (href && href.includes('/manga/') && !href.includes('chapter-') && !seenUrls.has(href)) {
+                seenUrls.add(href);
+                
+                const container = $(el).parent();
+                const title = $(el).attr('title') || container.find('img').attr('alt') || $(el).text().trim();
+                const img = container.find('img').attr('src') || $(el).find('img').attr('src') || "";
+                
+                const parts = href.split('/').filter(Boolean);
+                const slug = parts[parts.length - 1];
+
+                if (title && slug) {
+                  data.push({
+                    source: "ikiru.wtf",
+                    title,
+                    slug,
+                    image: img,
+                    detail_link: href,
+                    description: "",
+                    type_genre: "",
+                    info: "",
+                    chapter_awal: "",
+                    chapter_terbaru: "",
+                    chapters: []
+                  });
+                }
+              }
+            });
+        }
 
         const result = {
           success: true,
