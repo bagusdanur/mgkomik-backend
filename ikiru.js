@@ -10,7 +10,8 @@ function getRequestBaseUrl(req) {
 
 function toIkiruBackendImageUrl(url, req) {
   if (!url) return "";
-  return `${getRequestBaseUrl(req)}/ikiru/image?url=${encodeURIComponent(url)}`;
+  // Tembak langsung ke Worker dari browser frontend agar tidak memakan bandwidth VPS
+  return `${WORKER_PROXY}${WORKER_PROXY.includes("?") ? "&" : "?"}url=${encodeURIComponent(url)}&referer=${encodeURIComponent(IKIRU_BASE_URL + "/")}`;
 }
 
 async function fetchIkiruHtml(urlPath) {
