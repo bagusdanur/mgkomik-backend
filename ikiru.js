@@ -271,22 +271,37 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
 
         const chapters = [];
         const seenChapters = new Set();
-        $('a[href*="chapter-"]').each((i, el) => {
-          const href = $(el).attr('href');
-          if (href && !seenChapters.has(href)) {
-            seenChapters.add(href);
-            const parts = href.split('/').filter(Boolean);
-            const chapterSlug = parts[parts.length - 1];
-            
-            const chTitle = $(el).find('span').first().text().trim() || $(el).find('p').first().text().trim() || chapterSlug.replace(/-/g, ' ');
-            const chDate = translateTime($(el).find('time').text().trim() || "");
-            
-            chapters.push({
-              title: chTitle,
-              slug: `${slug}/${chapterSlug}`, 
-              link: href,
-              date: chDate 
-            });
+        
+        // Find chapters only in the actual list container (which has #search-chapter)
+        let chapterLinks = $('#search-chapter').parent().find('a[href*="chapter-"]');
+        if (chapterLinks.length === 0) {
+            // Fallback
+            chapterLinks = $('.overflow-auto a[href*="chapter-"]');
+        }
+        if (chapterLinks.length === 0) {
+            // Ultimate fallback
+            chapterLinks = $('a[href*="chapter-"]');
+        }
+
+        chapterLinks.each((i, el) => {
+          let href = $(el).attr('href');
+          if (href) {
+            href = href.trim();
+            if (!seenChapters.has(href)) {
+              seenChapters.add(href);
+              const parts = href.split('/').filter(Boolean);
+              const chapterSlug = parts[parts.length - 1];
+              
+              const chTitle = $(el).find('span').first().text().trim() || $(el).find('p').first().text().trim() || chapterSlug.replace(/-/g, ' ');
+              const chDate = translateTime($(el).find('time').text().trim() || "");
+              
+              chapters.push({
+                title: chTitle,
+                slug: `${slug}/${chapterSlug}`, 
+                link: href,
+                date: chDate 
+              });
+            }
           }
         });
 
