@@ -23,6 +23,19 @@ async function fetchIkiruHtml(urlPath) {
   return response.data;
 }
 
+function translateTime(str) {
+  if (!str) return "";
+  return str
+    .replace(/seconds?/i, "detik")
+    .replace(/minutes?/i, "menit")
+    .replace(/hours?/i, "jam")
+    .replace(/days?/i, "hari")
+    .replace(/weeks?/i, "minggu")
+    .replace(/months?/i, "bulan")
+    .replace(/years?/i, "tahun")
+    .replace(/ago/i, "lalu");
+}
+
 module.exports = function (app, { getCache, setCache, coalescedScrape }) {
 
   // ── IMAGE PROXY ──────────────────────────────────────
@@ -105,7 +118,7 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
             $(el).find('.flex-col a[href*="chapter-"]').each((idx, chEl) => {
                 const chLink = $(chEl).attr('href');
                 const chTitle = $(chEl).find('p').text().trim() || $(chEl).text().trim();
-                const chTime = $(chEl).find('time').text().trim() || "";
+                const chTime = translateTime($(chEl).find('time').text().trim() || "");
                 if(chLink && chTitle) {
                     chapters.push({
                         title: chTitle,
@@ -127,7 +140,7 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
                 image: img,
                 detail_link: href,
                 description: "",
-                type_genre: type_genre || "Manga", // fallback
+                type_genre: type_genre || "Manga",
                 info: latest.time || "",
                 chapter_awal: oldest.title || "",
                 chapter_terbaru: latest.title || "",
@@ -137,7 +150,6 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
           }
         });
 
-        // Backup for homepage carousel items (if no latest updates block found)
         if (data.length === 0) {
             $('a').each((i, el) => {
               const href = $(el).attr('href');
@@ -228,7 +240,28 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
             });
         }
 
-        const synopsis = $('.text-sm.text-gray-300').text().trim() || $('p').first().text().trim();
+        let synopsis = $('.text-sm.text-gray-300').text().trim() || $('p').first().text().trim();
+
+        let author = "-";
+        let status = "-";
+        let released = "-";
+        
+        $('script[type="application/ld+json"]').each((i, el) => {
+            try {
+                const json = JSON.parse($(el).html());
+                if (json && typeof json === 'object') {
+                    const data = Array.isArray(json) ? json : (json['@graph'] || [json]);
+                    for (const item of data) {
+                        if (item['@type'] && item['@type'].includes('ComicSeries')) {
+                            if (item.author && item.author.name) author = item.author.name.replace(/\]|\[Add/g, '').trim();
+                            if (item.creativeWorkStatus) status = item.creativeWorkStatus;
+                            if (item.datePublished) released = item.datePublished;
+                            if (item.description) synopsis = item.description.replace(/\[&hellip;\]/g, '...');
+                        }
+                    }
+                }
+            } catch(e) {}
+        });
 
         const genres = [];
         $('a[href*="/genre/"]').each((i, el) => {
@@ -244,13 +277,15 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
             seenChapters.add(href);
             const parts = href.split('/').filter(Boolean);
             const chapterSlug = parts[parts.length - 1];
-            const name = $(el).text().trim() || chapterSlug.replace(/-/g, ' ');
+            
+            const chTitle = $(el).find('span').first().text().trim() || $(el).find('p').first().text().trim() || chapterSlug.replace(/-/g, ' ');
+            const chDate = translateTime($(el).find('time').text().trim() || "");
             
             chapters.push({
-              title: name,
+              title: chTitle,
               slug: `${slug}/${chapterSlug}`, 
               link: href,
-              date: "" 
+              date: chDate 
             });
           }
         });
@@ -261,10 +296,10 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
               title: title || "",
               thumbnail: thumbnail || "",
               type: "",
-              status: "-",
-              Pengarang: "-",
+              status: status || "-",
+              Pengarang: author || "-",
               Umur: "-",
-              Konsep: "-",
+              Konsep: released || "-",
               artist: "-",
               genres: genres || [],
               synopsis: synopsis || "",
