@@ -35,15 +35,12 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
     try {
       const decodedUrl = decodeURIComponent(url);
       
-      // Fetch gambar LANGSUNG dari VPS, TANPA WORKER. 
-      // Karena Cloudflare Ikiru tidak memblokir file gambar static (.jpg/.png), 
-      // yang penting header Referer dikosongkan agar lolos dari hotlink protection.
       const response = await axios.get(decodedUrl, {
         responseType: "arraybuffer",
         timeout: 15000,
         headers: {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "" // Kosongkan referer untuk bypass Anti-Leech
+            "Referer": "" 
         }
       });
 
@@ -68,7 +65,6 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
     const cached = getCache(cacheKey);
     if (cached) {
       console.log(`⚡ [Cache Hit] ${cacheKey}`);
-      // Rewrite URLs inside cache based on current request
       const cloned = JSON.parse(JSON.stringify(cached));
       cloned.data.forEach(item => {
         if(item.image) item.image = toIkiruBackendImageUrl(item.image, req);
@@ -86,24 +82,29 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
 
         $('a').each((i, el) => {
           const href = $(el).attr('href');
-          // Match manga links but not chapters
           if (href && href.includes('/manga/') && !href.includes('chapter-') && !seenUrls.has(href)) {
             seenUrls.add(href);
             
-            // The structure is weird, so we traverse parents to find the image and title
             const container = $(el).parent();
             const title = $(el).attr('title') || container.find('img').attr('alt') || $(el).text().trim();
             const img = container.find('img').attr('src') || $(el).find('img').attr('src') || "";
             
-            // Extract slug
             const parts = href.split('/').filter(Boolean);
             const slug = parts[parts.length - 1];
 
             if (title && slug) {
               data.push({
+                source: "ikiru.wtf",
                 title,
                 slug,
                 image: img,
+                detail_link: href,
+                description: "",
+                type_genre: "", // Ikiru home doesn't show type easily
+                info: "",
+                chapter_awal: "",
+                chapter_terbaru: "",
+                chapters: []
               });
             }
           }
@@ -111,8 +112,11 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
 
         const result = {
           success: true,
-          source: "ikiru.wtf",
-          page,
+          meta: {
+            currentPage: page,
+            totalPages: page + 1, // Estimate since pagination is tricky on Ikiru
+            totalItems: data.length,
+          },
           data,
         };
 
@@ -120,7 +124,6 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
         return result;
       });
 
-      // Rewrite images for output
       const cloned = JSON.parse(JSON.stringify(responseData));
       cloned.data.forEach(item => {
         if(item.image) item.image = toIkiruBackendImageUrl(item.image, req);
@@ -129,7 +132,7 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
 
     } catch (err) {
       console.error("[Ikiru Pustaka Error]", err.message);
-      res.status(500).json({ success: false, message: err.message });
+      res.status(500).json({ success: false, message: err.message, meta: { currentPage: page, totalPages: 1, totalItems: 0 }, data: [] });
     }
   });
 
@@ -142,7 +145,7 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
     if (cached) {
       console.log(`⚡ [Cache Hit] ${cacheKey}`);
       const cloned = JSON.parse(JSON.stringify(cached));
-      if (cloned.thumbnail) cloned.thumbnail = toIkiruBackendImageUrl(cloned.thumbnail, req);
+      if (cloned.data && cloned.data.thumbnail) cloned.data.thumbnail = toIkiruBackendImageUrl(cloned.data.thumbnail, req);
       return res.json(cloned);
     }
 
@@ -156,16 +159,12 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
         let thumbnail = "";
         $('img.wp-post-image').each((i, el) => {
             const src = $(el).attr('src');
-            if(src && !src.includes('logo')) {
-                thumbnail = src;
-            }
+            if(src && !src.includes('logo')) thumbnail = src;
         });
         if(!thumbnail) {
             $('img').each((i, el) => {
                 const src = $(el).attr('src');
-                if(src && src.includes('wp-content/uploads') && !src.includes('logo')) {
-                    thumbnail = src;
-                }
+                if(src && src.includes('wp-content/uploads') && !src.includes('logo')) thumbnail = src;
             });
         }
 
@@ -173,7 +172,8 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
 
         const genres = [];
         $('a[href*="/genre/"]').each((i, el) => {
-          genres.push($(el).text().trim());
+          const g = $(el).text().trim();
+          if(g) genres.push(g);
         });
 
         const chapters = [];
@@ -182,28 +182,36 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
           const href = $(el).attr('href');
           if (href && !seenChapters.has(href)) {
             seenChapters.add(href);
-            // Extract chapter slug
             const parts = href.split('/').filter(Boolean);
             const chapterSlug = parts[parts.length - 1];
-            
-            // Extract chapter number from text or slug
             const name = $(el).text().trim() || chapterSlug.replace(/-/g, ' ');
             
             chapters.push({
               title: name,
-              slug: `${slug}/${chapterSlug}`, // We use compound slug to match the chapter structure
-              url: href
+              slug: `${slug}/${chapterSlug}`, 
+              link: href,
+              date: "" 
             });
           }
         });
 
         const result = {
           success: true,
-          title,
-          thumbnail,
-          synopsis,
-          genres,
-          chapters,
+          data: {
+              title: title || "",
+              thumbnail: thumbnail || "",
+              type: "",
+              status: "-",
+              Pengarang: "-",
+              Umur: "-",
+              Konsep: "-",
+              artist: "-",
+              genres: genres || [],
+              synopsis: synopsis || "",
+              info: "",
+              total_chapter: chapters.length,
+              chapters,
+          }
         };
 
         setCache(cacheKey, result, 3600); // 1 jam
@@ -211,7 +219,7 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
       });
 
       const cloned = JSON.parse(JSON.stringify(responseData));
-      if (cloned.thumbnail) cloned.thumbnail = toIkiruBackendImageUrl(cloned.thumbnail, req);
+      if (cloned.data && cloned.data.thumbnail) cloned.data.thumbnail = toIkiruBackendImageUrl(cloned.data.thumbnail, req);
       res.json(cloned);
 
     } catch (err) {
@@ -230,7 +238,7 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
     if (cached) {
       console.log(`⚡ [Cache Hit] ${cacheKey}`);
       const cloned = JSON.parse(JSON.stringify(cached));
-      cloned.images = cloned.images.map(img => toIkiruBackendImageUrl(img, req));
+      if(cloned.images) cloned.images = cloned.images.map(img => toIkiruBackendImageUrl(img, req));
       return res.json(cloned);
     }
 
@@ -242,15 +250,13 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
         const images = [];
         $('img').each((i, el) => {
           const src = $(el).attr('src');
-          // Basic filtering to avoid ads/logos
-          if (src && !src.includes('logo') && !src.includes('.gif') && !src.includes('banner')) {
+          if (src && !src.includes('logo') && !src.includes('.gif') && !src.includes('banner') && src.includes('wp-content')) {
             images.push(src);
           }
         });
 
         const title = $('h1').first().text().trim();
 
-        // Very basic prev/next extraction if available
         let prev = null;
         let next = null;
         $('a').each((i, el) => {
@@ -268,9 +274,11 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
           mangaId: slug,
           chapterSlug: fullSlug,
           currentChapter: title,
-          images,
           prev,
-          next
+          next,
+          back_to_detail: `${IKIRU_BASE_URL}/manga/${slug}/`,
+          totalImages: images.length,
+          images,
         };
 
         setCache(cacheKey, result, 3600 * 24); // 24 jam
@@ -278,7 +286,7 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
       });
 
       const cloned = JSON.parse(JSON.stringify(responseData));
-      cloned.images = cloned.images.map(img => toIkiruBackendImageUrl(img, req));
+      if(cloned.images) cloned.images = cloned.images.map(img => toIkiruBackendImageUrl(img, req));
       res.json(cloned);
 
     } catch (err) {
@@ -306,7 +314,6 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
 
     try {
       const responseData = await coalescedScrape(cacheKey, async () => {
-        // ikiru search typically: /?s=keyword
         const html = await fetchIkiruHtml(`/?s=${encodeURIComponent(query)}`);
         const $ = cheerio.load(html);
 
@@ -327,9 +334,17 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
 
             if (title && slug) {
               data.push({
+                source: "ikiru.wtf",
                 title,
                 slug,
                 image: img,
+                detail_link: href,
+                description: "",
+                type_genre: "",
+                info: "",
+                chapter_awal: "",
+                chapter_terbaru: "",
+                chapters: []
               });
             }
           }
@@ -353,7 +368,7 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
 
     } catch (err) {
       console.error("[Ikiru Search Error]", err.message);
-      res.status(500).json({ success: false, message: err.message });
+      res.status(500).json({ success: false, message: err.message, data: [] });
     }
   });
 
