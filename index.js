@@ -181,11 +181,7 @@ function getOriginalKiryuuImageUrl(url = "") {
 function toKiryuuBackendImageUrl(url, req) {
   const originalUrl = getOriginalKiryuuImageUrl(url);
   if (!originalUrl) return "";
-  // yuucdn.com dimatikan proxynya sesuai permintaan (menghindari error 502)
-  if (originalUrl.includes("yuucdn.com")) {
-    return originalUrl;
-  }
-  return originalUrl;
+  return `${getRequestBaseUrl(req)}/kiryuu/image?url=${encodeURIComponent(originalUrl)}`;
 }
 
 function rewriteKiryuuImages(payload, req) {
