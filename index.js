@@ -3547,25 +3547,8 @@ app.get("/kiryuu/pustaka", async (req, res) => {
 app.get("/kiryuu/image", async (req, res) => {
   try {
     const imageUrl = getOriginalKiryuuImageUrl(req.query.url || "");
-
-    let isAllowed = false;
-    try {
-      const parsedUrl = new URL(imageUrl);
-      const host = parsedUrl.hostname;
-      if (
-        host === "v6.kiryuu.to" ||
-        host.endsWith(".kiryuu.to") ||
-        host === "yuucdn.com" ||
-        host.endsWith(".yuucdn.com")
-      ) {
-        isAllowed = true;
-      }
-    } catch (e) {
-      isAllowed = false;
-    }
-
-    if (!imageUrl || !isAllowed) {
-      return res.status(400).send("URL gambar Kiryuu tidak valid");
+    if (!imageUrl) {
+      return res.status(400).send("URL gambar tidak valid");
     }
 
     const headers = {
