@@ -181,8 +181,8 @@ function getOriginalKiryuuImageUrl(url = "") {
 function toKiryuuBackendImageUrl(url, req) {
   const originalUrl = getOriginalKiryuuImageUrl(url);
   if (!originalUrl) return "";
-  // Cuma yuucdn.com / yuucdn.net yang perlu proxy — lainnya direct
-  if (originalUrl.includes("yuucdn.com") || originalUrl.includes("yuucdn.net")) {
+  // Cuma yuucdn.com yang perlu proxy — lainnya direct
+  if (originalUrl.includes("yuucdn.com")) {
     return `${getRequestBaseUrl(req)}/kiryuu/image?url=${encodeURIComponent(originalUrl)}`;
   }
   return originalUrl;
@@ -3552,12 +3552,12 @@ app.get("/kiryuu/image", async (req, res) => {
   try {
     const imageUrl = getOriginalKiryuuImageUrl(req.query.url || "");
 
-    // Validasi: cuma yuucdn yang boleh diproxy lewat sini
+    // Validasi: cuma yuucdn.com yang boleh diproxy lewat sini
     let isAllowed = false;
     try {
       const parsedUrl = new URL(imageUrl);
       const host = parsedUrl.hostname;
-      if (host.endsWith(".yuucdn.com") || host.endsWith(".yuucdn.net") || host === "yuucdn.com" || host === "yuucdn.net") {
+      if (host === "yuucdn.com" || host.endsWith(".yuucdn.com")) {
         isAllowed = true;
       }
     } catch (e) {
