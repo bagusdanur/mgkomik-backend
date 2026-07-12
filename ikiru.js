@@ -442,8 +442,11 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
         const images = [];
         $('img').each((i, el) => {
           const src = $(el).attr('src');
-          if (src && !src.includes('logo') && !src.includes('.gif') && !src.includes('banner') && src.includes('wp-content')) {
-            images.push(src);
+          // Ambil semua gambar kecuali logo, gif, banner, iklan, avatar
+          if (src && !src.includes('logo') && !src.includes('.gif') && !src.includes('banner') && !src.includes('gravatar') && !src.includes('histats') && !src.includes('stats')) {
+            if (src.includes('wp-content') || src.includes('cdn.uqni.net') || src.includes('yuucdn.com')) {
+              images.push(src);
+            }
           }
         });
 
