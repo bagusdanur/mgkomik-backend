@@ -3597,8 +3597,25 @@ app.get("/kiryuu/image", async (req, res) => {
       return true;
     }
 
-    // === STRATEGI 0: Dedicated yuucdn Worker Proxy (khusus yuucdn.com) ===
-    if (isYuucdn && YUUCDN_PROXY_URL) {
+    // === STRATEGI 0: Direct fetch (prioritas — cepet kalo yuucdn gak proteksi) ===
+    if (!imageBuffer) {
+      try {
+        const response = await axios.get(imageUrl, {
+          responseType: "arraybuffer",
+          timeout: 10000,
+          headers,
+        });
+        const ct = response.headers["content-type"] || "";
+        if (!trySetImage(response.data, ct, "Direct fetch", imageUrl)) {
+          errors.push("direct:response-bukan-gambar-valid");
+        }
+      } catch (err) {
+        errors.push(`direct:${err.response?.status || err.code || err.message}`);
+      }
+    }
+
+    // === STRATEGI 1: Dedicated yuucdn Worker Proxy (kalo direct kena blokir yuucdn) ===
+    if (!imageBuffer && isYuucdn && YUUCDN_PROXY_URL) {
       try {
         const yuucdnWorkerUrl = `${YUUCDN_PROXY_URL}${YUUCDN_PROXY_URL.includes("?") ? "&" : "?"}url=${encodeURIComponent(imageUrl)}&referer=${encodeURIComponent(KIRYUU_BASE_URL + "/")}`;
         const response = await axios.get(yuucdnWorkerUrl, {
@@ -3614,9 +3631,9 @@ app.get("/kiryuu/image", async (req, res) => {
       }
     }
 
-    // === STRATEGI 1: Cloudflare Worker Proxy ===
+    // === STRATEGI 2: Cloudflare Worker Proxy (fallback umum) ===
     const workerUrl = kiryuuProxyUrl(imageUrl);
-    if (workerUrl && !imageBuffer) {
+    if (!imageBuffer && workerUrl) {
       try {
         const response = await axios.get(workerUrl, {
           responseType: "arraybuffer",
@@ -3629,23 +3646,6 @@ app.get("/kiryuu/image", async (req, res) => {
         }
       } catch (err) {
         errors.push(`worker:${err.response?.status || err.code || err.message}`);
-      }
-    }
-
-    // === STRATEGI 2: Direct fetch ===
-    if (!imageBuffer) {
-      try {
-        const response = await axios.get(imageUrl, {
-          responseType: "arraybuffer",
-          timeout: 10000,
-          headers,
-        });
-        const ct = response.headers["content-type"] || "";
-        if (!trySetImage(response.data, ct, "Direct fetch", imageUrl)) {
-          errors.push("direct:response-bukan-gambar-valid");
-        }
-      } catch (err) {
-        errors.push(`direct:${err.response?.status || err.code || err.message}`);
       }
     }
 
