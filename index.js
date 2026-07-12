@@ -3579,6 +3579,24 @@ app.get("/kiryuu/image", async (req, res) => {
     const errors = [];
     const isYuucdn = imageUrl.includes("yuucdn.com");
 
+    // Helper: cek magic bytes buat validasi gambar beneran (bukan placeholder/protected)
+    function isValidImage(buf) {
+      if (!Buffer.isBuffer(buf) || buf.length < 500) return false;
+      const head = buf.slice(0, 4);
+      return (head[0] === 0xFF && head[1] === 0xD8) ||  // JPEG
+             (head[0] === 0x89 && head[1] === 0x50) ||  // PNG
+             (head[0] === 0x52 && head[1] === 0x49) ||  // WEBP (RIFF)
+             (head[0] === 0x47 && head[1] === 0x49);    // GIF
+    }
+
+    function trySetImage(buf, ct, strategy, url) {
+      if (!isValidImage(buf)) return false;
+      imageBuffer = buf;
+      contentType = ct.startsWith("image/") ? ct : "image/jpeg";
+      console.log(`[Kiryuu Proxy] ✅ ${strategy} berhasil untuk ${url}`);
+      return true;
+    }
+
     // === STRATEGI 0: Dedicated yuucdn Worker Proxy (khusus yuucdn.com) ===
     if (isYuucdn && YUUCDN_PROXY_URL) {
       try {
@@ -3588,42 +3606,33 @@ app.get("/kiryuu/image", async (req, res) => {
           timeout: 15000,
         });
         const ct = response.headers["content-type"] || "";
-        if (ct.startsWith("image/")) {
-          imageBuffer = response.data;
-          contentType = ct;
-          console.log(`[Kiryuu Proxy] ✅ Yuucdn Worker berhasil untuk ${imageUrl}`);
-        } else {
-          errors.push("yuucdn-worker:response-bukan-image");
+        if (!trySetImage(response.data, ct, "Yuucdn Worker", imageUrl)) {
+          errors.push("yuucdn-worker:bukan-gambar-valid");
         }
       } catch (err) {
         errors.push(`yuucdn-worker:${err.response?.status || err.code || err.message}`);
       }
     }
 
-    // === STRATEGI 1: Cloudflare Worker Proxy (paling reliable dari datacenter IP) ===
+    // === STRATEGI 1: Cloudflare Worker Proxy ===
     const workerUrl = kiryuuProxyUrl(imageUrl);
-    if (workerUrl) {
+    if (workerUrl && !imageBuffer) {
       try {
         const response = await axios.get(workerUrl, {
           responseType: "arraybuffer",
           timeout: 15000,
           headers,
         });
-        // Pastikan response bukan HTML (Cloudflare challenge)
         const ct = response.headers["content-type"] || "";
-        if (ct.startsWith("image/")) {
-          imageBuffer = response.data;
-          contentType = ct;
-          console.log(`[Kiryuu Proxy] ✅ Worker proxy berhasil untuk ${imageUrl}`);
-        } else {
-          errors.push("worker:response-bukan-image");
+        if (!trySetImage(response.data, ct, "Worker proxy", imageUrl)) {
+          errors.push("worker:response-bukan-gambar-valid");
         }
       } catch (err) {
         errors.push(`worker:${err.response?.status || err.code || err.message}`);
       }
     }
 
-    // === STRATEGI 2: Direct fetch (jika IP tidak diblokir Cloudflare) ===
+    // === STRATEGI 2: Direct fetch ===
     if (!imageBuffer) {
       try {
         const response = await axios.get(imageUrl, {
@@ -3632,12 +3641,8 @@ app.get("/kiryuu/image", async (req, res) => {
           headers,
         });
         const ct = response.headers["content-type"] || "";
-        if (ct.startsWith("image/")) {
-          imageBuffer = response.data;
-          contentType = ct;
-          console.log(`[Kiryuu Proxy] ✅ Direct fetch berhasil untuk ${imageUrl}`);
-        } else {
-          errors.push("direct:response-bukan-image");
+        if (!trySetImage(response.data, ct, "Direct fetch", imageUrl)) {
+          errors.push("direct:response-bukan-gambar-valid");
         }
       } catch (err) {
         errors.push(`direct:${err.response?.status || err.code || err.message}`);
@@ -3653,23 +3658,13 @@ app.get("/kiryuu/image", async (req, res) => {
           timeout: 20000,
           headers,
         });
-        // Cek apakah response adalah gambar (bukan HTML challenge)
-        if (Buffer.isBuffer(csResult) && csResult.length > 1000) {
-          // Cek magic bytes: JPEG (FFD8), PNG (8950), WEBP (52494646), GIF (47494638)
-          const head = csResult.slice(0, 4);
-          const isImage = (head[0] === 0xFF && head[1] === 0xD8) ||  // JPEG
-                          (head[0] === 0x89 && head[1] === 0x50) ||  // PNG
-                          (head[0] === 0x52 && head[1] === 0x49) ||  // WEBP (RIFF)
-                          (head[0] === 0x47 && head[1] === 0x49);    // GIF
-          if (isImage) {
-            imageBuffer = csResult;
-            if (head[0] === 0xFF) contentType = "image/jpeg";
-            else if (head[0] === 0x89) contentType = "image/png";
-            else if (head[0] === 0x52) contentType = "image/webp";
-            else if (head[0] === 0x47) contentType = "image/gif";
-            console.log(`[Kiryuu Proxy] ✅ Cloudscraper berhasil untuk ${imageUrl}`);
+        if (Buffer.isBuffer(csResult) && csResult.length > 500) {
+          if (trySetImage(csResult, "image/jpeg", "Cloudscraper", imageUrl)) {
+            if (csResult[0] === 0x89) contentType = "image/png";
+            else if (csResult[0] === 0x52) contentType = "image/webp";
+            else if (csResult[0] === 0x47) contentType = "image/gif";
           } else {
-            errors.push("cloudscraper:response-bukan-image");
+            errors.push("cloudscraper:response-bukan-gambar-valid");
           }
         } else {
           errors.push("cloudscraper:response-terlalu-kecil-atau-bukan-buffer");
