@@ -46,27 +46,109 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
     }
 
     try {
-      const decodedUrl = decodeURIComponent(url);
-      
-      const response = await axios.get(decodedUrl, {
-        responseType: "arraybuffer",
-        timeout: 15000,
-        headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "" 
-        }
-      });
+      const imageUrl = decodeURIComponent(url);
 
-      const ct = response.headers["content-type"] || "image/jpeg";
+      const headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        Referer: "https://06.ikiru.wtf/",
+      };
+
+      let imageBuffer;
+      let contentType = "image/jpeg";
+      const errors = [];
+
+      // Helper: cek magic bytes
+      function isValidImage(buf) {
+        if (!Buffer.isBuffer(buf) || buf.length < 500) return false;
+        const head = buf.slice(0, 4);
+        return (head[0] === 0xFF && head[1] === 0xD8) ||
+               (head[0] === 0x89 && head[1] === 0x50) ||
+               (head[0] === 0x52 && head[1] === 0x49) ||
+               (head[0] === 0x47 && head[1] === 0x49);
+      }
+
+      function trySetImage(buf, ct, strategy, imgUrl) {
+        if (!isValidImage(buf)) return false;
+        imageBuffer = buf;
+        contentType = ct.startsWith("image/") ? ct : "image/jpeg";
+        console.log(`[Ikiru Proxy] ✅ ${strategy} berhasil untuk ${imgUrl}`);
+        return true;
+      }
+
+      // STRATEGI 0: Direct fetch
+      try {
+        const response = await axios.get(imageUrl, {
+          responseType: "arraybuffer",
+          timeout: 10000,
+          headers,
+        });
+        const ct = response.headers["content-type"] || "";
+        if (!trySetImage(response.data, ct, "Direct fetch", imageUrl)) {
+          errors.push("direct:bukan-gambar-valid");
+        }
+      } catch (err) {
+        errors.push(`direct:${err.response?.status || err.code || err.message}`);
+      }
+
+      // STRATEGI 1: Worker proxy (kalo direct kena blokir)
+      if (!imageBuffer && WORKER_PROXY) {
+        try {
+          const sep = WORKER_PROXY.includes("?") ? "&" : "?";
+          const workerUrl = `${WORKER_PROXY}${sep}url=${encodeURIComponent(imageUrl)}&referer=${encodeURIComponent("https://06.ikiru.wtf/")}`;
+          const response = await axios.get(workerUrl, {
+            responseType: "arraybuffer",
+            timeout: 15000,
+          });
+          const ct = response.headers["content-type"] || "";
+          if (!trySetImage(response.data, ct, "Worker proxy", imageUrl)) {
+            errors.push("worker:bukan-gambar-valid");
+          }
+        } catch (err) {
+          errors.push(`worker:${err.response?.status || err.code || err.message}`);
+        }
+      }
+
+      // STRATEGI 2: Cloudscraper (bypass Cloudflare)
+      if (!imageBuffer) {
+        try {
+          const cloudscraper = require("cloudscraper");
+          const csResult = await cloudscraper.get({
+            uri: imageUrl,
+            encoding: null,
+            timeout: 20000,
+            headers,
+          });
+          if (Buffer.isBuffer(csResult) && csResult.length > 500) {
+            if (trySetImage(csResult, "image/jpeg", "Cloudscraper", imageUrl)) {
+              if (csResult[0] === 0x89) contentType = "image/png";
+              else if (csResult[0] === 0x52) contentType = "image/webp";
+              else if (csResult[0] === 0x47) contentType = "image/gif";
+            } else {
+              errors.push("cloudscraper:bukan-gambar-valid");
+            }
+          } else {
+            errors.push("cloudscraper:response-terlalu-kecil");
+          }
+        } catch (err) {
+          errors.push(`cloudscraper:${err.message}`);
+        }
+      }
+
+      if (!imageBuffer) {
+        console.error(`[Ikiru Proxy] ❌ Semua gagal: ${errors.join(" -> ")}`);
+        return res.status(502).send(`Gagal ambil gambar: ${errors.join(" -> ")}`);
+      }
+
       res.set({
-        "Content-Type": ct,
-        "Content-Length": response.data.length,
-        "Cache-Control": "public, max-age=31536000",
+        "Content-Type": contentType,
+        "Content-Length": imageBuffer.length,
+        "Cache-Control": "public, max-age=86400, s-maxage=86400",
       });
-      res.send(response.data);
+      res.send(imageBuffer);
     } catch (err) {
       console.error(`[Ikiru Proxy Error] URL: ${url} | Error: ${err.message}`);
-      res.status(err.response?.status || 500).send(err.message);
+      res.status(502).send(err.message);
     }
   });
 
