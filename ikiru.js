@@ -266,6 +266,9 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
 
         const result = {
           success: true,
+          source: "ikiru.wtf",
+          page,
+          total: data.length,
           meta: {
             currentPage: page,
             totalPages: page + 1,
