@@ -169,7 +169,7 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
 
     try {
       const responseData = await coalescedScrape(cacheKey, async () => {
-        const html = await fetchIkiruHtml(`/?page=${page}`);
+        const html = await fetchIkiruHtml(`/?page=${page}&pagedfor=latest`);
         const $ = cheerio.load(html);
 
         const data = [];
