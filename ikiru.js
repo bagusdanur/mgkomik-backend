@@ -175,7 +175,7 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
         const data = [];
         const seenUrls = new Set();
 
-        $('.flex.items-start.gap-4').each((i, el) => {
+        $('#latest-list .flex.items-start.gap-4').each((i, el) => {
           const detailLinkEl = $(el).find('a[href*="/manga/"]').first();
           const href = detailLinkEl.attr('href');
           
