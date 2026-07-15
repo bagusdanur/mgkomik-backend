@@ -548,7 +548,7 @@ async function scrapeKiryuuDetail(url) {
       console.log("Gagal ambil daftar chapter Kiryuu:", err.message);
     }
 
-    chapters.reverse();
+    // chapters.reverse();
     return {
       success: true,
       data: {
