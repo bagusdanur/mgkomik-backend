@@ -390,6 +390,8 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
           }
         });
 
+        chapters.reverse();
+
         const result = {
           success: true,
           data: {
