@@ -1,4 +1,4 @@
-const axios = require("axios");
+﻿const axios = require("axios");
 const https = require("https");
 const cloudscraper = require("cloudscraper");
 const cheerio = require("cheerio");
@@ -1819,13 +1819,31 @@ app.get("/animeid/video-proxy", async (req, res) => {
 
     let html = response.data;
 
+    // =====================================================================
+    // FIX 1: Strip Cloudflare RUM / beacon / challenge scripts
+    // Ini penyebab error: Access to XHR at /cdn-cgi/rum? blocked by CORS
+    // Browser tidak boleh fetch ke cdn-cgi/rum dari origin ryukomik kita
+    // =====================================================================
+    // Hapus tag <script src="...cdn-cgi/..."> yang ditambahkan Cloudflare
+    html = html.replace(/<script\b[^>]*\bsrc=["'][^"']*\/cdn-cgi\/[^"']*["'][^>]*>\s*<\/script>/gi, "");
+    // Hapus inline script yang berisi __cfBeacon (Cloudflare Web Analytics)
+    html = html.replace(/<script\b[^>]*>[^<]*__cfBeacon[^<]*<\/script>/gi, "");
+    // Hapus inline script lain yang masih referensi cdn-cgi
+    html = html.replace(/<script\b[^>]*>[^<]*\/cdn-cgi\/[^<]*<\/script>/gi, "");
+
     // Bypass frame-busting/embed domain alert check
     html = html.replace(/function\s+showAlert\s*\(\)\s*\{/g, "function showAlert() { return;");
 
     // Strip CSP meta tag that forces upgrade to HTTPS on localhost
-    html = html.replace(/<meta http-equiv=["']Content-Security-Policy["'] content=["']upgrade-insecure-requests["']\s*\/?>/gi, "");
+    html = html.replace(/<meta http-equiv=["']Content-Security-Policy["'] content=["']upgrade-insecure-requests["']\s*\/?>\s*/gi, "");
 
-    // Decrypt and route stream URL through our proxy (error 202000 / 403)
+    // =====================================================================
+    // FIX 2: Decrypt player script & rewrite SEMUA URL kotakanimeid
+    // termasuk go/dl/ yang di-XHR langsung oleh JW Player (error 202000)
+    // Semua URL harus melewati /animeid/stream-proxy/ di backend kita
+    // =====================================================================
+    const baseProxyUrl = `${getRequestBaseUrl(req)}/animeid/stream-proxy/`;
+
     const encryptRegex = /var\s+([a-zA-Z0-9_$]+)\s*=\s*\[([\d,\s]+)\];\s*(?:var\s+)?([a-zA-Z0-9_$]+)\s*=\s*atob\("([^"]+)"\);/;
     const match = html.match(encryptRegex);
     if (match) {
@@ -1838,15 +1856,17 @@ app.get("/animeid/video-proxy", async (req, res) => {
           decryptedJs += String.fromCharCode(encryptedBytes[i] ^ keys[i % keys.length]);
         }
 
-        // Extract the stream URL (e.g. https://s1.kotakanimeid.link/go/dl/?url=... or googlevideo.com)
-        const fileMatch = decryptedJs.match(/"file"\s*:\s*"([^"]+)"/);
-        if (fileMatch) {
-          const rawUrl = fileMatch[1];
-          const streamUrl = rawUrl.replace(/\\/g, ""); // Strip backslashes if present
-          const cleanCdnUrl = streamUrl.replace(/^https?:\/\//, "");
-          const proxiedStreamUrl = `${getRequestBaseUrl(req)}/animeid/stream-proxy/${cleanCdnUrl}`;
-          decryptedJs = decryptedJs.replace(rawUrl, proxiedStreamUrl);
-        }
+        // Rewrite semua "file":"<url>" di dalam decrypted JS
+        // JW Player 202000 terjadi karena URL go/dl/ di-XHR cross-origin oleh player
+        decryptedJs = decryptedJs.replace(
+          /"file"\s*:\s*"(https?:\/\/[^"\\]+(?:\\.[^"]*)*)"/g,
+          function(fullMatch, rawUrl) {
+            const streamUrl = rawUrl.replace(/\\/g, "");
+            const cleanCdnUrl = streamUrl.replace(/^https?:\/\//, "");
+            const proxiedStreamUrl = `${baseProxyUrl}${cleanCdnUrl}`;
+            return `"file":"${proxiedStreamUrl}"`;
+          }
+        );
 
         // Replace the entire anonymous function script tag with the decrypted and modified JS
         const scriptBlockRegex = /<script>\(function\(\)\{[\s\S]+?<\/script>/;
@@ -1854,6 +1874,25 @@ app.get("/animeid/video-proxy", async (req, res) => {
       } catch (decryptErr) {
         console.error("Gagal mendecrypt player script:", decryptErr.message);
       }
+    }
+
+    // =====================================================================
+    // FIX 3: Rewrite semua URL kotakanimeid yang masih ada di raw HTML
+    // (misalnya di attribute src, fetch(), XHR call, dsb)
+    // Ini mencegah browser langsung hit s1.kotakanimeid.link -> CORS error
+    // =====================================================================
+    const kotakUrls = new Set();
+    const kotakUrlRegex = /https?:\/\/[a-z0-9.-]*\.kotakanimeid\.link[^"'\s<>]*/g;
+    for (const kotakMatch of html.matchAll(kotakUrlRegex)) {
+      // Jangan rewrite cdn-cgi (sudah distrip) dan yang sudah kena proxy
+      if (kotakMatch[0].indexOf("/cdn-cgi/") === -1 && kotakMatch[0].indexOf("/animeid/stream-proxy/") === -1) {
+        kotakUrls.add(kotakMatch[0]);
+      }
+    }
+    for (const kotakUrl of kotakUrls) {
+      const cleanCdnUrl = kotakUrl.replace(/^https?:\/\//, "");
+      const proxied = `${baseProxyUrl}${cleanCdnUrl}`;
+      html = html.split(kotakUrl).join(proxied);
     }
 
     // Inject base href tag to make relative assets work
@@ -2194,4 +2233,4 @@ app.get("/nekopoi/stream-proxy/:encodedUrl", async (req, res) => {
 
 app.listen(3014, "0.0.0.0", () => {
   console.log("🚀 Server jalan di http://localhost:3014");
-});
+});
