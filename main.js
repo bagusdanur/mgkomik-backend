@@ -1,4 +1,4 @@
-﻿const axios = require("axios");
+const axios = require("axios");
 const https = require("https");
 const cloudscraper = require("cloudscraper");
 const cheerio = require("cheerio");
@@ -1722,6 +1722,29 @@ app.get("/animeid/episode/:slug", async (req, res) => {
   res.json(result);
 });
 
+function unpackAnimeIdPackedScripts(html) {
+  if (typeof html !== "string") return "";
+  let unpackedResults = "";
+  const scriptRegex = /<script[^>]*>([\s\S]*?)<\/script>/gi;
+  for (const match of html.matchAll(scriptRegex)) {
+    const code = match[1];
+    if (code && code.includes("eval(function(p,a,c,k,e,d)")) {
+      try {
+        const idx = code.indexOf("eval(function(p,a,c,k,e,d)");
+        if (idx !== -1) {
+          const evalBlock = code.substring(idx);
+          const unpackCode = evalBlock.replace("eval(function(p,a,c,k,e,d)", "return (function(p,a,c,k,e,d)");
+          const unpacked = new Function(unpackCode)();
+          if (unpacked) unpackedResults += "\n" + unpacked;
+        }
+      } catch (err) {
+        console.error("Dean Edwards unpack error:", err.message);
+      }
+    }
+  }
+  return unpackedResults;
+}
+
 app.get("/animeid/resolve-stream", async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).send("url required");
@@ -1755,27 +1778,39 @@ app.get("/animeid/resolve-stream", async (req, res) => {
     }
 
     const html = response.data;
+    let combinedCode = typeof html === "string" ? html : "";
 
-    // Decrypt and route stream URL through our proxy (error 202000 / 403)
-    const encryptRegex = /var\s+([a-zA-Z0-9_$]+)\s*=\s*\[([\d,\s]+)\];\s*(?:var\s+)?([a-zA-Z0-9_$]+)\s*=\s*atob\("([^"]+)"\);/;
-    const match = html.match(encryptRegex);
-    if (match) {
-      const keys = match[2].split(",").map(Number);
-      const base64Data = match[4];
-      const encryptedBytes = Buffer.from(base64Data, "base64");
-      let decryptedJs = "";
-      for (let i = 0; i < encryptedBytes.length; i++) {
-        decryptedJs += String.fromCharCode(encryptedBytes[i] ^ keys[i % keys.length]);
-      }
+    // 1. Unpack Dean Edwards P,A,C,K,E,R scripts if present
+    const unpackedCode = unpackAnimeIdPackedScripts(combinedCode);
+    if (unpackedCode) {
+      combinedCode += "\n" + unpackedCode;
+    }
 
-      const fileMatch = decryptedJs.match(/"file"\s*:\s*"([^"]+)"/);
-      if (fileMatch) {
-        const rawUrl = fileMatch[1];
-        const streamUrl = rawUrl.replace(/\\/g, ""); // Strip backslashes if present
-        const cleanCdnUrl = streamUrl.replace(/^https?:\/\//, "");
-        const proxiedStreamUrl = `${getRequestBaseUrl(req)}/animeid/stream-proxy/${cleanCdnUrl}`;
-        return res.redirect(proxiedStreamUrl);
+    // 2. Decrypt atob() encrypted strings if present
+    const encryptRegex = /var\s+([a-zA-Z0-9_$]+)\s*=\s*\[([\d,\s]+)\];\s*(?:var\s+)?([a-zA-Z0-9_$]+)\s*=\s*atob\("([^"]+)"\);/g;
+    for (const match of (typeof html === "string" ? html.matchAll(encryptRegex) : [])) {
+      try {
+        const keys = match[2].split(",").map(Number);
+        const base64Data = match[4];
+        const encryptedBytes = Buffer.from(base64Data, "base64");
+        let decryptedJs = "";
+        for (let i = 0; i < encryptedBytes.length; i++) {
+          decryptedJs += String.fromCharCode(encryptedBytes[i] ^ keys[i % keys.length]);
+        }
+        combinedCode += "\n" + decryptedJs;
+      } catch (e) {
+        console.error("atob decrypt error:", e.message);
       }
+    }
+
+    // 3. Extract `"file": "..."` URL from the combined/unpacked scripts
+    const fileMatch = combinedCode.match(/["']file["']\s*:\s*["']([^"']+)["']/i);
+    if (fileMatch) {
+      const rawUrl = fileMatch[1];
+      const streamUrl = rawUrl.replace(/\\/g, ""); // Strip backslashes if present
+      const cleanCdnUrl = streamUrl.replace(/^https?:\/\//i, "");
+      const proxiedStreamUrl = `${getRequestBaseUrl(req)}/animeid/stream-proxy/${cleanCdnUrl}`;
+      return res.redirect(proxiedStreamUrl);
     }
 
     res.status(404).send("Stream URL not found in player page");
@@ -1845,17 +1880,26 @@ app.get("/animeid/video-proxy", async (req, res) => {
     // Semua request ke *.kotakanimeid.link dialihkan ke /animeid/stream-proxy/.
     // =====================================================================
     const backendBase = getRequestBaseUrl(req);
+    const urlObjForHost = new URL(url);
+    const originHost = urlObjForHost.host;
     const interceptorScript = `<script>
 (function() {
   'use strict';
   var BACKEND = '${backendBase}';
   var PROXY_PREFIX = BACKEND + '/animeid/stream-proxy/';
+  var ORIGIN_HOST = '${originHost}';
 
   function proxyUrl(u) {
     if (!u || typeof u !== 'string') return u;
-    // Proxy semua URL ke *.kotakanimeid.link (go/dl, cdn2, dll)
-    if (/https?:\/\/[a-z0-9.-]*\.kotakanimeid\.link/.test(u)) {
-      var clean = u.replace(/^https?:\/\//, '');
+    if (u.indexOf('/animeid/stream-proxy/') !== -1 || u.indexOf('/animeid/video-proxy') !== -1) return u;
+    // Proxy relative URLs (like /go/dl/?url=... or go/dl/?url=... or /ajax/...)
+    if (u.indexOf('http://') !== 0 && u.indexOf('https://') !== 0 && u.indexOf('data:') !== 0 && u.indexOf('blob:') !== 0) {
+      var cleanRel = u.replace(/^\\/+/, '');
+      return PROXY_PREFIX + ORIGIN_HOST + '/' + cleanRel;
+    }
+    // Proxy absolute URLs pointing to *.kotakanimeid.link
+    if (/https?:\\/\\/[a-z0-9.-]*\\.kotakanimeid\\.link/i.test(u)) {
+      var clean = u.replace(/^https?:\\/\\//i, '');
       return PROXY_PREFIX + clean;
     }
     return u;
@@ -1939,10 +1983,15 @@ app.get(/^\/animeid\/stream-proxy\/(.+)/, async (req, res) => {
   const targetUrl = `https://${targetPath}${queryStr}`;
 
   try {
+    const targetUrlObj = new URL(targetUrl);
+    const originReferer = targetUrl.includes("kotakanimeid.link")
+      ? "https://s1.kotakanimeid.link/"
+      : `${targetUrlObj.protocol}//${targetUrlObj.host}/`;
+
     const headers = {
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      "Referer": "https://s1.kotakanimeid.link/",
+      "Referer": originReferer,
     };
 
     // Forward Range header if requested (critical for partial content and seek in players)
