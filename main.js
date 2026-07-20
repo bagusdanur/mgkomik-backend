@@ -1900,8 +1900,8 @@ app.get("/animeid/video-proxy", async (req, res) => {
       var cleanRel = u.replace(/^\\/+/, '');
       return PROXY_PREFIX + ORIGIN_HOST + '/' + cleanRel;
     }
-    // Proxy absolute URLs pointing to *.kotakanimeid.link
-    if (/https?:\\/\\/[a-z0-9.-]*\\.kotakanimeid\\.link/i.test(u)) {
+    // Proxy absolute URLs pointing to *.kotakanimeid.link or *.googlevideo.com
+    if (/https?:\\/\\/([a-z0-9.-]*\\.kotakanimeid\\.link|[a-z0-9.-]*\\.googlevideo\\.com)/i.test(u)) {
       var clean = u.replace(/^https?:\\/\\//i, '');
       return PROXY_PREFIX + clean;
     }
@@ -1930,6 +1930,30 @@ app.get("/animeid/video-proxy", async (req, res) => {
       input = new Request(proxyUrl(input.url), input);
     }
     return origFetch(input, init);
+  };
+
+  // === Intercept HTMLMediaElement src ===
+  var OrigMediaElement = window.HTMLMediaElement;
+  if (OrigMediaElement) {
+    var origSrcDesc = Object.getOwnPropertyDescriptor(OrigMediaElement.prototype, 'src');
+    if (origSrcDesc) {
+      Object.defineProperty(OrigMediaElement.prototype, 'src', {
+        get: function() { return origSrcDesc.get.call(this); },
+        set: function(val) { return origSrcDesc.set.call(this, proxyUrl(val)); },
+        configurable: true
+      });
+    }
+  }
+
+  // === Intercept setAttribute ===
+  var origSetAttribute = Element.prototype.setAttribute;
+  Element.prototype.setAttribute = function(name, value) {
+    if (this.tagName && (this.tagName.toUpperCase() === 'VIDEO' || this.tagName.toUpperCase() === 'AUDIO' || this.tagName.toUpperCase() === 'SOURCE')) {
+      if (name.toLowerCase() === 'src') {
+        value = proxyUrl(value);
+      }
+    }
+    return origSetAttribute.call(this, name, value);
   };
 })();
 </script>`;
