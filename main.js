@@ -1892,8 +1892,11 @@ app.get("/animeid/video-proxy", async (req, res) => {
   function proxyUrl(u) {
     if (!u || typeof u !== 'string') return u;
     if (u.indexOf('/animeid/stream-proxy/') !== -1 || u.indexOf('/animeid/video-proxy') !== -1) return u;
-    // Proxy relative URLs (like /go/dl/?url=... or go/dl/?url=... or /ajax/...)
-    if (u.indexOf('http://') !== 0 && u.indexOf('https://') !== 0 && u.indexOf('data:') !== 0 && u.indexOf('blob:') !== 0) {
+    // Convert protocol-relative URLs to https
+    if (u.indexOf('//') === 0) {
+      u = 'https:' + u;
+    } else if (u.indexOf('http://') !== 0 && u.indexOf('https://') !== 0 && u.indexOf('data:') !== 0 && u.indexOf('blob:') !== 0) {
+      // Proxy relative URLs (like /go/dl/?url=... or go/dl/?url=... or /ajax/...)
       var cleanRel = u.replace(/^\\/+/, '');
       return PROXY_PREFIX + ORIGIN_HOST + '/' + cleanRel;
     }
@@ -1984,9 +1987,7 @@ app.get(/^\/animeid\/stream-proxy\/(.+)/, async (req, res) => {
 
   try {
     const targetUrlObj = new URL(targetUrl);
-    const originReferer = targetUrl.includes("kotakanimeid.link")
-      ? "https://s1.kotakanimeid.link/"
-      : `${targetUrlObj.protocol}//${targetUrlObj.host}/`;
+    const originReferer = `${targetUrlObj.protocol}//${targetUrlObj.host}/`;
 
     const headers = {
       "User-Agent":
