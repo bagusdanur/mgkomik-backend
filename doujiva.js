@@ -1,6 +1,6 @@
 /**
  * =====================================================
- * ⚡ SCRAPER DOUJIVA - https://doujiva.com/
+ * Scraper route Doujiva, menggunakan sumber https://manga18.me/
  * =====================================================
  * Format output JSON disesuaikan dengan scraper Asura & Kiryuu
  * Memiliki fallback multi-strategi fetch + Image Proxy untuk CORS CDN
@@ -9,9 +9,11 @@
 
 const axios = require("axios");
 const cheerio = require("cheerio");
-const cloudscraper = require("cloudscraper");
+const https = require("https");
 
-const DOUJIVA_SITE_BASE = "https://doujiva.com";
+const DOUJIVA_SITE_BASE = "https://manga18.me";
+const MANGA18_HOST = "manga18.me";
+let manga18DnsCache = { addresses: [], expiresAt: 0 };
 
 // ===========================
 // 🛠️ HELPER FUNCTIONS
@@ -36,9 +38,49 @@ function doujivaHeaders(referer = DOUJIVA_SITE_BASE + "/") {
 }
 
 function isCloudflareChallenge(html = "") {
-  return /Just a moment|cf_chl|challenge-platform|Enable JavaScript and cookies/i.test(
+  return /Just a moment|cf_chl|challenge-platform|Enable JavaScript and cookies|SITUS DIBLOKIR|Trustpositif/i.test(
     String(html)
   );
+}
+
+async function resolveManga18PublicDns() {
+  if (manga18DnsCache.addresses.length && manga18DnsCache.expiresAt > Date.now()) {
+    return manga18DnsCache.addresses;
+  }
+  const { data } = await axios.get("https://dns.google/resolve", {
+    params: { name: MANGA18_HOST, type: "A" },
+    headers: { Accept: "application/dns-json" },
+    timeout: 10000,
+  });
+  const addresses = (data?.Answer || [])
+    .filter((answer) => answer.type === 1 && /^\d{1,3}(?:\.\d{1,3}){3}$/.test(answer.data))
+    .map((answer) => answer.data);
+  if (!addresses.length) throw new Error("DNS publik Manga18 tidak menghasilkan alamat IPv4");
+  manga18DnsCache = { addresses, expiresAt: Date.now() + 5 * 60 * 1000 };
+  return addresses;
+}
+
+async function createManga18PublicDnsAgent() {
+  const addresses = await resolveManga18PublicDns();
+  let cursor = 0;
+  return new https.Agent({
+    lookup(hostname, options, callback) {
+      if (hostname === MANGA18_HOST || hostname === `www.${MANGA18_HOST}`) {
+        const address = addresses[cursor++ % addresses.length];
+        if (options?.all) {
+          return callback(null, [{ address, family: 4 }]);
+        }
+        return callback(null, address, 4);
+      }
+      require("dns").lookup(hostname, options, callback);
+    },
+  });
+}
+
+async function fetchManga18WithPublicDns(fullUrl, headers, timeout) {
+  const agent = await createManga18PublicDnsAgent();
+  const { data } = await axios.get(fullUrl, { headers, timeout, httpsAgent: agent });
+  return data;
 }
 
 async function doujivaFetch(endpoint, options = {}) {
@@ -46,31 +88,6 @@ async function doujivaFetch(endpoint, options = {}) {
   const headers = doujivaHeaders(options.referer || DOUJIVA_SITE_BASE + "/");
   const timeout = options.timeout || 20000;
   const errors = [];
-
-  // Optional FlareSolverr-compatible service. A normal HTTP proxy (including
-  // the old Worker fallback below) cannot execute Cloudflare's JS challenge.
-  const solverBaseUrl = String(process.env.DOUJIVA_FLARESOLVERR_URL || "").replace(/\/$/, "");
-  if (solverBaseUrl) {
-    try {
-      const { data } = await axios.post(
-        `${solverBaseUrl}/v1`,
-        {
-          cmd: "request.get",
-          url: fullUrl,
-          maxTimeout: timeout,
-        },
-        { timeout: timeout + 5000 }
-      );
-      const html = data?.solution?.response;
-      if (data?.status === "ok" && typeof html === "string" && html.trim() && !isCloudflareChallenge(html)) {
-        console.log(`[Doujiva] Solver berhasil untuk ${fullUrl}`);
-        return html;
-      }
-      errors.push(`solver:${data?.message || "respons-tidak-valid"}`);
-    } catch (err) {
-      errors.push(`solver:${err.response?.status || err.code || err.message}`);
-    }
-  }
 
   // Strategi 1: Axios direct
   try {
@@ -84,20 +101,21 @@ async function doujivaFetch(endpoint, options = {}) {
     errors.push(`axios:${err.response?.status || err.code || err.message}`);
   }
 
-  // Strategi 2: Cloudscraper
+  // Strategi 2: DNS-over-HTTPS, untuk jaringan yang mengarahkan domain ke
+  // halaman Trustpositif/Komdigi.
   try {
-    const html = await cloudscraper.get({ uri: fullUrl, headers, timeout });
+    const html = await fetchManga18WithPublicDns(fullUrl, headers, timeout);
     if (typeof html === "string" && html.trim() && !isCloudflareChallenge(html)) {
-      console.log(`[Doujiva] ✅ Cloudscraper berhasil untuk ${fullUrl}`);
+      console.log(`[Manga18] DNS publik berhasil untuk ${fullUrl}`);
       return html;
     }
-    errors.push("cloudscraper:cloudflare-challenge");
+    errors.push("public-dns:respons-diblokir");
   } catch (err) {
-    errors.push(`cloudscraper:${err.message}`);
+    errors.push(`public-dns:${err.response?.status || err.code || err.message}`);
   }
 
   // Strategi 3: Worker proxy
-  const WORKER_PROXY = process.env.DOUJIVA_PROXY_URL || process.env.NEKO_WORKER_URL || "https://proxy.kopipaitboskuh.workers.dev/?url=";
+  const WORKER_PROXY = process.env.DOUJIVA_PROXY_URL || "https://proxy.kopipaitboskuh.workers.dev/?url=";
   if (WORKER_PROXY) {
     try {
       const workerUrl = `${WORKER_PROXY}${WORKER_PROXY.includes("?") ? "" : "?url="}${encodeURIComponent(fullUrl)}`;
@@ -157,52 +175,35 @@ function rewriteDoujivaImages(payload, req) {
   return rewritten;
 }
 
-// Helper untuk ekstrak JSON dari Next.js App Router __next_f stream
-function extractNextFlightData(html) {
-  const matches = [];
-  const regex = /self\.__next_f\.push\(\[1,"([\s\S]*?)"\]\)/g;
-  let match;
-  while ((match = regex.exec(html)) !== null) {
-    try {
-      const rawStr = match[1]
-        .replace(/\\"/g, '"')
-        .replace(/\\\\/g, "\\");
-      matches.push(rawStr);
-    } catch {
-      // Ignore parse errors
-    }
-  }
-  return matches.join("\n");
-}
-
 // =====================================================
 // 📚 SCRAPER: PUSTAKA / LATEST UPDATES
 // =====================================================
 
 async function scrapeDoujivaPustaka({ page = 1, sort = "latest" } = {}) {
   try {
-    let endpoint = `/?page=${page}`;
-    if (sort && sort !== "latest") {
-      endpoint = `/?sort=${sort}&page=${page}`;
-    }
+    const sortMap = { latest: "latest", alphabet: "alphabet", rating: "rating", trending: "trending" };
+    const orderby = sortMap[sort] || "latest";
+    const endpoint = page > 1 ? `/manga/${page}?orderby=${orderby}` : `/manga?orderby=${orderby}`;
     console.log("⚡ Doujiva pustaka:", endpoint);
 
     const html = await doujivaFetch(endpoint);
     const $ = cheerio.load(html);
     const results = [];
 
-    // Parse dari elemen HTML (DOM)
-    $(".content-grid > div, grid > div, article, .group").each((_, el) => {
-      const linkEl = $(el).find("a[href*='/g/'], a[href*='/manga/'], a[href*='/read/']").first();
-      const href = linkEl.attr("href") || $(el).attr("href") || "";
+    $(".manga-listing-item .page-item-detail").each((_, el) => {
+      const linkEl = $(el).find(".item-title a[href^='/manga/']").first();
+      const href = linkEl.attr("href") || "";
       if (!href) return;
 
-      const title = $(el).find("h2, h3, .title, font, p.font-bold, p.font-semibold").first().text().trim() || linkEl.text().trim();
-      const imgEl = $(el).find("img").first();
-      let image = imgEl.attr("src") || imgEl.attr("data-src") || "";
+      const title = linkEl.text().replace(/\s+/g, " ").trim();
+      const imgEl = $(el).find(".item-thumb img").first();
+      const image = imgEl.attr("data-src") || imgEl.attr("src") || "";
 
       const slug = href.replace(DOUJIVA_SITE_BASE, "").replace(/^\/|\/$/g, "");
-      const chapterText = $(el).find(".chapter, .ep, span.text-xs").first().text().trim() || "Chapter 1";
+      const chapterEl = $(el).find(".chapter-item .chapter a").first();
+      const chapterText = chapterEl.text().replace(/\s+/g, " ").trim() || "Chapter 1";
+      const chapterHref = chapterEl.attr("href") || href;
+      const rating = $(el).find(".item-rate [data-rating]").attr("data-rating") || $(el).find(".item-rate span").last().text().trim();
 
       if (title && slug) {
         results.push({
@@ -213,14 +214,14 @@ async function scrapeDoujivaPustaka({ page = 1, sort = "latest" } = {}) {
           detail_link: href.startsWith("http") ? href : `${DOUJIVA_SITE_BASE}/${slug}`,
           description: "",
           type_genre: "doujinshi",
-          info: "Updated",
+          info: rating ? `Rating ${rating}` : "Updated",
           chapter_awal: "Chapter 1",
           chapter_terbaru: chapterText,
           chapters: [
             {
               title: chapterText,
-              link: `chapter/${slug}`,
-              time: "baru saja",
+              link: `chapter/${chapterHref.replace(/^\/|\/$/g, "")}`,
+              time: $(el).find(".chapter-item .post-on").first().text().trim() || "baru saja",
               locked: false,
             }
           ],
@@ -228,42 +229,15 @@ async function scrapeDoujivaPustaka({ page = 1, sort = "latest" } = {}) {
       }
     });
 
-    // Fallback parser dari __next_f stream jika DOM kosong
-    if (results.length === 0) {
-      const flightData = extractNextFlightData(html);
-      const idMatches = [...flightData.matchAll(/"id":"([^"]+)","title":"([^"]+)"/g)];
-      for (const m of idMatches) {
-        const id = m[1];
-        const title = m[2];
-        results.push({
-          source: "doujiva",
-          title,
-          slug: `g/${id}`,
-          image: `https://t.nhentai.net/galleries/${id}/cover.jpg`,
-          detail_link: `${DOUJIVA_SITE_BASE}/g/${id}`,
-          description: "",
-          type_genre: "doujinshi",
-          info: "Updated",
-          chapter_awal: "Chapter 1",
-          chapter_terbaru: "Chapter 1",
-          chapters: [
-            {
-              title: "Full Chapter",
-              link: `chapter/g/${id}`,
-              time: "baru saja",
-              locked: false,
-            }
-          ],
-        });
-      }
-    }
+    const pageNumbers = $(".pagination [data-page]").map((_, el) => Number($(el).attr("data-page")) + 1).get().filter(Number.isFinite);
+    const totalPages = Math.max(page, ...pageNumbers);
 
     return {
       success: true,
       meta: {
         currentPage: page,
-        totalPages: 50,
-        totalItems: results.length * 50,
+        totalPages,
+        totalItems: results.length * totalPages,
       },
       data: results,
     };
@@ -284,45 +258,45 @@ async function scrapeDoujivaPustaka({ page = 1, sort = "latest" } = {}) {
 async function scrapeDoujivaDetail(slug) {
   try {
     const cleanSlug = slug.trim().replace(/^\/|\/$/g, "");
-    const endpoint = cleanSlug.startsWith("g/") || cleanSlug.startsWith("manga/") ? `/${cleanSlug}` : `/g/${cleanSlug}`;
+    const endpoint = cleanSlug.startsWith("manga/") ? `/${cleanSlug}` : `/manga/${cleanSlug}`;
     console.log("⚡ Doujiva detail:", endpoint);
 
     const html = await doujivaFetch(endpoint);
     const $ = cheerio.load(html);
 
-    const title = $("h1").first().text().trim() || $("title").text().split("—")[0].trim() || "Doujin Details";
-    const thumbnail = $("img.cover, .aspect-\\[3\\/4\\] img, img[alt*='cover']").first().attr("src") || $("img").first().attr("src") || "";
-    const synopsis = $(".synopsis, .description, p.text-sm").first().text().trim() || "Tidak ada sinopsis.";
+    const title = $(".manga-summary .post-title h1").first().text().replace(/\s+/g, " ").trim() || $("h1").first().text().trim();
+    const coverEl = $(".manga-summary .summary_image img").first();
+    const thumbnail = coverEl.attr("data-src") || coverEl.attr("src") || "";
+    const synopsis = $(".panel-story-description .ss-manga").first().text().replace(/\s+/g, " ").trim() || $("meta[name='description']").attr("content") || "Tidak ada sinopsis.";
 
     const genres = [];
-    $("a[href*='/tag/'], a[href*='/category/'], .tag").each((_, el) => {
+    $(".genres-content a[href^='/genre/']").each((_, el) => {
       const g = $(el).text().trim();
       if (g && !genres.includes(g)) genres.push(g);
     });
 
-    const artist = $("a[href*='/artist/']").first().text().trim() || "-";
-    const author = $("a[href*='/group/']").first().text().trim() || artist;
-
-    const chapters = [
-      {
-        title: "Full Chapter / Read Online",
-        slug: cleanSlug,
-        link: `chapter/${cleanSlug}`,
-        date: "baru saja",
-      }
-    ];
-
-    // Jika ada daftar chapter/halaman khusus
-    $(".chapter-list a, .episodes a").each((i, el) => {
-      const chHref = $(el).attr("href");
-      const chTitle = $(el).text().trim() || `Chapter ${i + 1}`;
+    const artist = $(".artist-content a").map((_, el) => $(el).text().trim()).get().filter(Boolean).join(", ") || "-";
+    const author = $(".author-content a").map((_, el) => $(el).text().trim()).get().filter(Boolean).join(", ") || artist;
+    const getField = (label) => {
+      let value = "";
+      $(".post-content_item").each((_, el) => {
+        const heading = $(el).find(".summary-heading").text().replace(/\s+/g, " ").trim().toLowerCase();
+        if (heading.startsWith(label.toLowerCase())) value = $(el).find(".summary-content").first().text().replace(/\s+/g, " ").trim();
+      });
+      return value;
+    };
+    const chapters = [];
+    $(".row-content-chapter li").each((i, el) => {
+      const anchor = $(el).find("a.chapter-name").first();
+      const chHref = anchor.attr("href");
+      const chTitle = anchor.text().replace(/\s+/g, " ").trim() || `Chapter ${i + 1}`;
       if (chHref) {
         const chSlug = chHref.replace(DOUJIVA_SITE_BASE, "").replace(/^\/|\/$/g, "");
         chapters.push({
           title: chTitle,
           slug: chSlug,
           link: `chapter/${chSlug}`,
-          date: "baru saja",
+          date: $(el).find(".chapter-time").text().trim() || "baru saja",
         });
       }
     });
@@ -333,10 +307,10 @@ async function scrapeDoujivaDetail(slug) {
         title,
         thumbnail,
         type: "doujinshi",
-        status: "Completed",
+        status: getField("status") || "Unknown",
         Pengarang: author,
         Umur: "18+",
-        Konsep: "Doujinshi",
+        Konsep: getField("alternative") || "Manga18",
         artist,
         genres,
         synopsis,
@@ -363,10 +337,7 @@ async function scrapeDoujivaChapter(seriesSlug, chapterSlug) {
     const cleanSeriesSlug = seriesSlug ? seriesSlug.trim().replace(/^\/|\/$/g, "") : "";
     const cleanChapterSlug = chapterSlug ? chapterSlug.trim().replace(/^\/|\/$/g, "") : cleanSeriesSlug;
     
-    let endpoint = `/${cleanChapterSlug}`;
-    if (!cleanChapterSlug.startsWith("g/") && !cleanChapterSlug.startsWith("manga/")) {
-      endpoint = `/g/${cleanChapterSlug}`;
-    }
+    const endpoint = cleanChapterSlug.startsWith("manga/") ? `/${cleanChapterSlug}` : `/manga/${cleanChapterSlug}`;
     console.log("⚡ Doujiva chapter:", endpoint);
 
     const html = await doujivaFetch(endpoint);
@@ -374,36 +345,23 @@ async function scrapeDoujivaChapter(seriesSlug, chapterSlug) {
 
     const images = [];
 
-    // Extract dari img tag di DOM
-    $("img[src*='/galleries/'], img[data-src*='/galleries/'], .reader-image img, .page-image img").each((_, el) => {
+    $(".read-content img").each((_, el) => {
       const src = $(el).attr("data-src") || $(el).attr("src");
-      const isCover = /\/(?:cover|thumb(?:nail)?)[^/]*\.(?:jpe?g|png|webp)(?:\?|$)/i.test(src || "");
-      if (src && !isCover && !images.includes(src)) {
+      if (src && !images.includes(src)) {
         images.push(src);
       }
     });
-
-    // Fallback: parse URL gambar dari Next.js __next_f data
-    if (images.length === 0) {
-      const flightData = extractNextFlightData(html);
-      const imgRegex = /https:\/\/i\.nhentai\.net\/galleries\/[0-9]+\/[0-9]+\.(jpg|png|webp)/g;
-      const foundImgs = flightData.match(imgRegex);
-      if (foundImgs) {
-        foundImgs.forEach((img) => {
-          if (!images.includes(img)) images.push(img);
-        });
-      }
-    }
-
-    const title = $("h1").first().text().trim() || `Chapter ${cleanChapterSlug}`;
+    const title = $("h1").first().text().replace(/\s+/g, " ").trim() || $("title").text().split("-")[0].trim() || `Chapter ${cleanChapterSlug}`;
+    const prevHref = $(".navi-change-chapter-btn-prev").first().attr("href") || "";
+    const nextHref = $(".navi-change-chapter-btn-next").first().attr("href") || "";
 
     return {
       success: true,
       mangaId: cleanSeriesSlug,
       chapterSlug: cleanChapterSlug,
       currentChapter: title,
-      prev: null,
-      next: null,
+      prev: prevHref ? prevHref.replace(/^\/manga\//, "") : null,
+      next: nextHref ? nextHref.replace(/^\/manga\//, "") : null,
       back_to_detail: cleanSeriesSlug,
       totalImages: images.length,
       images,
@@ -423,21 +381,25 @@ async function scrapeDoujivaChapter(seriesSlug, chapterSlug) {
 
 async function scrapeDoujivaSearch(query, page = 1) {
   try {
-    const endpoint = `/?q=${encodeURIComponent(query)}&page=${page}`;
+    const endpoint = page > 1
+      ? `/search/${page}?q=${encodeURIComponent(query)}`
+      : `/search?q=${encodeURIComponent(query)}`;
     console.log("⚡ Doujiva search:", endpoint);
 
     const html = await doujivaFetch(endpoint);
     const $ = cheerio.load(html);
     const results = [];
 
-    $(".content-grid > div, grid > div, article, .group").each((_, el) => {
-      const linkEl = $(el).find("a[href*='/g/'], a[href*='/manga/']").first();
+    $(".manga-listing-item .page-item-detail").each((_, el) => {
+      const linkEl = $(el).find(".item-title a[href^='/manga/']").first();
       const href = linkEl.attr("href") || "";
       if (!href) return;
 
-      const title = $(el).find("h2, h3, .title, p.font-bold").first().text().trim() || linkEl.text().trim();
-      const image = $(el).find("img").first().attr("src") || "";
+      const title = linkEl.text().replace(/\s+/g, " ").trim();
+      const imgEl = $(el).find(".item-thumb img").first();
+      const image = imgEl.attr("data-src") || imgEl.attr("src") || "";
       const slug = href.replace(DOUJIVA_SITE_BASE, "").replace(/^\/|\/$/g, "");
+      const rating = $(el).find(".item-rate [data-rating]").attr("data-rating") || $(el).find(".item-rate span").last().text().trim();
 
       if (title && slug) {
         results.push({
@@ -445,20 +407,22 @@ async function scrapeDoujivaSearch(query, page = 1) {
           image,
           detail_link: `${DOUJIVA_SITE_BASE}/${slug}`,
           type_genre: "doujinshi",
-          update: "Full",
-          rating: "5.0",
+          update: $(el).find(".chapter-item .chapter a").first().text().trim() || "Updated",
+          rating: rating || "0",
           slug,
         });
       }
     });
 
+    const pageNumbers = $(".pagination [data-page]").map((_, el) => Number($(el).attr("data-page")) + 1).get().filter(Number.isFinite);
+    const totalPages = Math.max(page, ...pageNumbers);
     return {
       success: true,
       query,
       meta: {
         currentPage: page,
-        totalPages: 10,
-        totalItems: results.length * 10,
+        totalPages,
+        totalItems: results.length * totalPages,
       },
       data: results,
     };
@@ -489,12 +453,20 @@ module.exports = function registerDoujivaRoutes(app, { getCache, setCache, coale
 
     try {
       const decodedUrl = decodeURIComponent(url);
-      
-      const response = await axios.get(decodedUrl, {
+      const parsedImageUrl = new URL(decodedUrl);
+      const allowedImageHost = parsedImageUrl.hostname === MANGA18_HOST || parsedImageUrl.hostname.endsWith(`.${MANGA18_HOST}`);
+      if (!allowedImageHost) {
+        return res.status(400).send("URL gambar Manga18 tidak valid");
+      }
+      const requestOptions = {
         headers: doujivaHeaders(DOUJIVA_SITE_BASE + "/"),
         responseType: "stream",
         timeout: 20000,
-      });
+      };
+      if (parsedImageUrl.hostname === MANGA18_HOST || parsedImageUrl.hostname === `www.${MANGA18_HOST}`) {
+        requestOptions.httpsAgent = await createManga18PublicDnsAgent();
+      }
+      const response = await axios.get(decodedUrl, requestOptions);
 
       res.set({
         "Content-Type": response.headers["content-type"] || "image/jpeg",
