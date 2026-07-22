@@ -334,8 +334,12 @@ async function scrapeDoujivaDetail(slug) {
 
 async function scrapeDoujivaChapter(seriesSlug, chapterSlug) {
   try {
-    const cleanSeriesSlug = seriesSlug ? seriesSlug.trim().replace(/^\/|\/$/g, "") : "";
-    const cleanChapterSlug = chapterSlug ? chapterSlug.trim().replace(/^\/|\/$/g, "") : cleanSeriesSlug;
+    const normalizeChapterSlug = (value = "") => value
+      .trim()
+      .replace(/^\/+|\/+$/g, "")
+      .replace(/^(?:doujiva\/)?chapter\//i, "");
+    const cleanSeriesSlug = normalizeChapterSlug(seriesSlug);
+    const cleanChapterSlug = normalizeChapterSlug(chapterSlug || cleanSeriesSlug);
     
     const endpoint = cleanChapterSlug.startsWith("manga/") ? `/${cleanChapterSlug}` : `/manga/${cleanChapterSlug}`;
     console.log("⚡ Doujiva chapter:", endpoint);
@@ -345,15 +349,32 @@ async function scrapeDoujivaChapter(seriesSlug, chapterSlug) {
 
     const images = [];
 
-    $(".read-content img").each((_, el) => {
-      const src = $(el).attr("data-src") || $(el).attr("src");
+    $(".read-content img, .reading-content img, #readerarea img").each((_, el) => {
+      const src = $(el).attr("data-src")
+        || $(el).attr("data-original")
+        || $(el).attr("data-lazy-src")
+        || $(el).attr("src");
       if (src && !images.includes(src)) {
         images.push(src);
       }
     });
+    if (images.length === 0) {
+      const matches = html.match(/https?:\\?\/\\?\/img-r\d+\.manga18\.me\\?\/[^"'<>\\\s]+?\.(?:jpe?g|png|webp)(?:\?[^"'<>\\\s]*)?/gi) || [];
+      for (const match of matches) {
+        const src = match.replace(/\\\//g, "/");
+        if (!images.includes(src)) images.push(src);
+      }
+    }
     const title = $("h1").first().text().replace(/\s+/g, " ").trim() || $("title").text().split("-")[0].trim() || `Chapter ${cleanChapterSlug}`;
     const prevHref = $(".navi-change-chapter-btn-prev").first().attr("href") || "";
     const nextHref = $(".navi-change-chapter-btn-next").first().attr("href") || "";
+
+    if (images.length === 0) {
+      return {
+        success: false,
+        message: "Gambar chapter Manga18 tidak ditemukan",
+      };
+    }
 
     return {
       success: true,
@@ -562,7 +583,9 @@ module.exports = function registerDoujivaRoutes(app, { getCache, setCache, coale
 
   // ── CHAPTER ─────────────────────────────────────────
   app.get(/^\/doujiva\/chapter\/(.+)/, async (req, res) => {
-    const fullSlug = req.params[0];
+    const fullSlug = String(req.params[0] || "")
+      .replace(/^\/+|\/+$/g, "")
+      .replace(/^(?:doujiva\/)?chapter\//i, "");
     if (!fullSlug) {
       return res.status(400).json({ success: false, message: "Slug chapter tidak lengkap!" });
     }
