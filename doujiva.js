@@ -18,7 +18,7 @@ const DOUJIVA_SITE_BASE = "https://doujiva.com";
 // ===========================
 
 function doujivaHeaders(referer = DOUJIVA_SITE_BASE + "/") {
-  return {
+  const headers = {
     "User-Agent":
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
     Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -26,6 +26,13 @@ function doujivaHeaders(referer = DOUJIVA_SITE_BASE + "/") {
     Referer: referer,
     Connection: "keep-alive",
   };
+
+  // cf_clearance is bound to the visitor IP and User-Agent. On a VPS it can
+  // be supplied without hard-coding a short-lived cookie in the repository.
+  if (process.env.DOUJIVA_COOKIE) {
+    headers.Cookie = process.env.DOUJIVA_COOKIE;
+  }
+  return headers;
 }
 
 function isCloudflareChallenge(html = "") {
@@ -39,6 +46,31 @@ async function doujivaFetch(endpoint, options = {}) {
   const headers = doujivaHeaders(options.referer || DOUJIVA_SITE_BASE + "/");
   const timeout = options.timeout || 20000;
   const errors = [];
+
+  // Optional FlareSolverr-compatible service. A normal HTTP proxy (including
+  // the old Worker fallback below) cannot execute Cloudflare's JS challenge.
+  const solverBaseUrl = String(process.env.DOUJIVA_FLARESOLVERR_URL || "").replace(/\/$/, "");
+  if (solverBaseUrl) {
+    try {
+      const { data } = await axios.post(
+        `${solverBaseUrl}/v1`,
+        {
+          cmd: "request.get",
+          url: fullUrl,
+          maxTimeout: timeout,
+        },
+        { timeout: timeout + 5000 }
+      );
+      const html = data?.solution?.response;
+      if (data?.status === "ok" && typeof html === "string" && html.trim() && !isCloudflareChallenge(html)) {
+        console.log(`[Doujiva] Solver berhasil untuk ${fullUrl}`);
+        return html;
+      }
+      errors.push(`solver:${data?.message || "respons-tidak-valid"}`);
+    } catch (err) {
+      errors.push(`solver:${err.response?.status || err.code || err.message}`);
+    }
+  }
 
   // Strategi 1: Axios direct
   try {
@@ -345,7 +377,8 @@ async function scrapeDoujivaChapter(seriesSlug, chapterSlug) {
     // Extract dari img tag di DOM
     $("img[src*='/galleries/'], img[data-src*='/galleries/'], .reader-image img, .page-image img").each((_, el) => {
       const src = $(el).attr("data-src") || $(el).attr("src");
-      if (src && !images.includes(src)) {
+      const isCover = /\/(?:cover|thumb(?:nail)?)[^/]*\.(?:jpe?g|png|webp)(?:\?|$)/i.test(src || "");
+      if (src && !isCover && !images.includes(src)) {
         images.push(src);
       }
     });
@@ -432,11 +465,11 @@ async function scrapeDoujivaSearch(query, page = 1) {
   } catch (err) {
     console.error("❌ Doujiva search error:", err.message);
     return {
-      success: true,
+      success: false,
       query,
       meta: { currentPage: page, totalPages: 1, totalItems: 0 },
       data: [],
-      warning: "Gagal melakukan pencarian Doujiva",
+      message: err.message,
     };
   }
 }
@@ -458,10 +491,7 @@ module.exports = function registerDoujivaRoutes(app, { getCache, setCache, coale
       const decodedUrl = decodeURIComponent(url);
       
       const response = await axios.get(decodedUrl, {
-        headers: {
-          "Referer": DOUJIVA_SITE_BASE + "/",
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
-        },
+        headers: doujivaHeaders(DOUJIVA_SITE_BASE + "/"),
         responseType: "stream",
         timeout: 20000,
       });
@@ -495,13 +525,13 @@ module.exports = function registerDoujivaRoutes(app, { getCache, setCache, coale
       const responseData = await coalescedScrape(cacheKey, async () => {
         const result = await scrapeDoujivaPustaka({ page, sort });
 
-        if (!result.success || !result.data.length) {
+        if (!result.success) {
           return {
-            success: true,
+            success: false,
             page,
             total: 0,
             data: [],
-            warning: "Data kosong / Doujiva limit",
+            message: "Sumber Doujiva tidak dapat diakses",
           };
         }
 
@@ -515,6 +545,9 @@ module.exports = function registerDoujivaRoutes(app, { getCache, setCache, coale
         };
       });
 
+      if (!responseData.success) {
+        return res.status(502).json(responseData);
+      }
       setCache(cacheKey, responseData, 120); // Cache 2 menit
       res.json(responseData);
     } catch (err) {
@@ -523,7 +556,7 @@ module.exports = function registerDoujivaRoutes(app, { getCache, setCache, coale
   });
 
   // ── DETAIL ──────────────────────────────────────────
-  app.get("/doujiva/detail/*", async (req, res) => {
+  app.get(/^\/doujiva\/detail\/(.+)/, async (req, res) => {
     const slug = req.params[0];
     if (!slug) {
       return res.status(400).json({ success: false, message: "Slug tidak diberikan!" });
@@ -548,7 +581,7 @@ module.exports = function registerDoujivaRoutes(app, { getCache, setCache, coale
       if (result && result.success) {
         setCache(cacheKey, result, 900); // Cache 15 menit
       }
-      res.json(result);
+      res.status(result?.success ? 200 : 502).json(result);
     } catch (err) {
       console.error("Route error:", err.message);
       res.status(500).json({ success: false, message: "Terjadi kesalahan pada server" });
@@ -556,7 +589,7 @@ module.exports = function registerDoujivaRoutes(app, { getCache, setCache, coale
   });
 
   // ── CHAPTER ─────────────────────────────────────────
-  app.get("/doujiva/chapter/*", async (req, res) => {
+  app.get(/^\/doujiva\/chapter\/(.+)/, async (req, res) => {
     const fullSlug = req.params[0];
     if (!fullSlug) {
       return res.status(400).json({ success: false, message: "Slug chapter tidak lengkap!" });
@@ -585,9 +618,9 @@ module.exports = function registerDoujivaRoutes(app, { getCache, setCache, coale
       if (result && result.success) {
         setCache(cacheKey, result, 7200); // Cache 2 jam
       }
-      res.json(result);
+      res.status(result?.success ? 200 : 502).json(result);
     } catch (err) {
-      res.json({ success: false, message: err.message });
+      res.status(502).json({ success: false, message: err.message });
     }
   });
 
@@ -616,12 +649,15 @@ module.exports = function registerDoujivaRoutes(app, { getCache, setCache, coale
         return result;
       });
 
+      if (!responseData.success) {
+        return res.status(502).json(responseData);
+      }
       setCache(cacheKey, responseData, 300); // Cache 5 menit
       res.json(responseData);
     } catch (err) {
       console.error("❌ Doujiva search route error:", err.message);
-      res.status(200).json({
-        success: true,
+      res.status(502).json({
+        success: false,
         query: q,
         meta: { currentPage: page, totalPages: 1, totalItems: 0 },
         data: [],
