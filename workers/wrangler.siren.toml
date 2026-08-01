@@ -1,0 +1,4 @@
+name = "ryukomik-siren-archive"
+main = "siren-archive-proxy.js"
+compatibility_date = "2026-08-01"
+workers_dev = true
