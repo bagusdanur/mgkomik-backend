@@ -47,7 +47,15 @@ async function sirenFetch(endpoint, options = {}) {
     isCloudflareChallenge(response.data)
   ) {
     if (process.env.SIREN_ARCHIVE_FALLBACK !== "false") {
-      const archived = await axios.get(`${SIREN_ARCHIVE_BASE}${url}`, {
+      const archiveUrl = `${SIREN_ARCHIVE_BASE}${url}`;
+      const proxyBase = cleanText(
+        process.env.SIREN_ARCHIVE_PROXY_URL ||
+          "https://ryukomik-siren-archive.kopipaitboskuh.workers.dev/"
+      );
+      const fetchUrl = proxyBase
+        ? `${proxyBase}${proxyBase.includes("?") ? "&" : "?"}url=${encodeURIComponent(url)}`
+        : archiveUrl;
+      const archived = await axios.get(fetchUrl, {
         headers: sirenHeaders(SIREN_SITE_BASE),
         timeout: options.timeout || 30000,
         responseType: options.responseType || "text",
