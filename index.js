@@ -4514,6 +4514,7 @@ require("./ikiru")(app, { getCache, setCache, coalescedScrape });
 require("./asura")(app, { getCache, setCache, coalescedScrape });
 require("./doujiva")(app, { getCache, setCache, coalescedScrape });
 require("./omega")(app, { getCache, setCache, coalescedScrape });
+require("./siren")(app, { getCache, setCache, coalescedScrape });
 
 app.listen(PORT, () =>
   console.log(`🚀 Server jalan di http://localhost:${PORT}`),
