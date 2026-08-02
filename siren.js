@@ -7,6 +7,7 @@ const SIREN_SITE_BASE = "https://sirenscans.com";
 const SIREN_CDN_BASE = "https://cdn.meowing.org/uploads";
 const SIREN_ARCHIVE_BASE = "https://web.archive.org/web/2id_/";
 const SIREN_PAGE_SIZE = 24;
+let sirenCatalogCache = { expiresAt: 0, data: null, pending: null };
 const SIREN_IMAGE_HOSTS = new Set([
   "sirenscans.com",
   "cdn.meowing.org",
@@ -69,7 +70,12 @@ async function sirenFetch(endpoint, options = {}) {
       ) {
         return archived.data;
       }
-      throw new Error(`Snapshot Siren tidak tersedia (HTTP ${archived.status})`);
+      const archiveError = new Error(
+        `Snapshot Siren tidak tersedia (HTTP ${archived.status})`
+      );
+      archiveError.status = archived.status;
+      archiveError.archiveMissing = archived.status === 404;
+      throw archiveError;
     }
     throw new Error(
       "Siren Scans dilindungi Cloudflare; isi SIREN_COOKIE dengan clearance yang sah"
@@ -97,6 +103,53 @@ function paginateSirenResult(result, page) {
     archivedFallback: true,
   };
   return result;
+}
+
+async function getSirenCatalogItems() {
+  if (sirenCatalogCache.data && sirenCatalogCache.expiresAt > Date.now()) {
+    return sirenCatalogCache.data;
+  }
+  if (sirenCatalogCache.pending) return sirenCatalogCache.pending;
+  sirenCatalogCache.pending = (async () => {
+    const html = await sirenFetch("/latest/");
+    const items = parseSirenListHtml(html).data;
+    if (!items.length) throw new Error("Data komik Siren kosong");
+    sirenCatalogCache = {
+      expiresAt: Date.now() + 120000,
+      data: items,
+      pending: null,
+    };
+    return items;
+  })();
+  try {
+    return await sirenCatalogCache.pending;
+  } catch (error) {
+    sirenCatalogCache.pending = null;
+    throw error;
+  }
+}
+
+function catalogItemAsDetail(item) {
+  return {
+    success: true,
+    partial: true,
+    message: "Metadata detail berasal dari katalog karena snapshot halaman detail belum tersedia.",
+    data: {
+      title: item.title,
+      thumbnail: item.image,
+      type: item.type_genre || "comic",
+      status: item.info || "Unknown",
+      Pengarang: "-",
+      Umur: "-",
+      Konsep: "-",
+      artist: "-",
+      genres: [],
+      synopsis: item.description || "Sinopsis belum tersedia pada snapshot katalog.",
+      info: item.info || "",
+      total_chapter: item.chapters.length,
+      chapters: item.chapters,
+    },
+  };
 }
 
 function cleanText(value, fallback = "") {
@@ -454,15 +507,15 @@ function parseSirenChapterHtml(html, seriesSlug, chapterSlug) {
 }
 
 async function scrapeSirenPustaka({ page = 1 } = {}) {
-  const html = await sirenFetch("/latest/");
-  const result = paginateSirenResult(parseSirenListHtml(html, { page }), page);
+  const items = await getSirenCatalogItems();
+  const result = paginateSirenResult({ success: true, data: [...items] }, page);
   if (!result.data.length) throw new Error("Data komik Siren kosong");
   return result;
 }
 
 async function scrapeSirenSearch(query, page = 1) {
-  const html = await sirenFetch("/series/");
-  const parsed = parseSirenListHtml(html, { page, search: true });
+  const items = await getSirenCatalogItems();
+  const parsed = { success: true, data: [...items] };
   const needle = query.toLocaleLowerCase("en");
   parsed.data = parsed.data.filter((item) =>
     item.title.toLocaleLowerCase("en").includes(needle)
@@ -486,8 +539,17 @@ async function scrapeSirenSearch(query, page = 1) {
 
 async function scrapeSirenDetail(slug) {
   const cleanSlug = seriesSlugFromHref(slug);
-  const html = await sirenFetch(`/series/${encodeURIComponent(cleanSlug)}/`);
-  return parseSirenDetailHtml(html, cleanSlug);
+  try {
+    const html = await sirenFetch(`/series/${encodeURIComponent(cleanSlug)}/`);
+    return parseSirenDetailHtml(html, cleanSlug);
+  } catch (error) {
+    if (!error.archiveMissing) throw error;
+    const item = (await getSirenCatalogItems()).find(
+      (candidate) => candidate.slug === cleanSlug
+    );
+    if (!item) throw error;
+    return catalogItemAsDetail(item);
+  }
 }
 
 async function scrapeSirenChapter(seriesSlug, chapterSlug) {
@@ -584,8 +646,14 @@ module.exports = function registerSirenRoutes(
       if (result.success) setCache(cacheKey, result, 900);
       res.status(result.success ? 200 : 502).json(result);
     } catch (error) {
-      console.error(`[Siren Detail Error] ${error.message}`);
-      res.status(502).json({ success: false, message: error.message });
+      console.error(`[Siren Detail Error] ${slug}: ${error.message}`);
+      res.status(error.archiveMissing ? 404 : 502).json({
+        success: false,
+        unavailable: Boolean(error.archiveMissing),
+        message: error.archiveMissing
+          ? "Detail Siren tidak ditemukan pada katalog maupun arsip."
+          : error.message,
+      });
     }
   });
 
@@ -606,8 +674,16 @@ module.exports = function registerSirenRoutes(
       if (result.success) setCache(cacheKey, result, 7200);
       res.status(result.success ? 200 : result.locked ? 403 : 502).json(result);
     } catch (error) {
-      console.error(`[Siren Chapter Error] ${error.message}`);
-      res.status(502).json({ success: false, message: error.message });
+      console.error(
+        `[Siren Chapter Error] ${seriesSlug}/${chapterSlug}: ${error.message}`
+      );
+      res.status(error.archiveMissing ? 404 : 502).json({
+        success: false,
+        unavailable: Boolean(error.archiveMissing),
+        message: error.archiveMissing
+          ? "Snapshot chapter Siren belum tersedia."
+          : error.message,
+      });
     }
   });
 
