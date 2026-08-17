@@ -103,7 +103,7 @@ async function coalescedScrape(urlKey, scrapeFn) {
 }
 
 
-const KIRYUU_BASE_URL = "https://v6.kiryuu.to";
+const KIRYUU_BASE_URL = "https://v7.kiryuu.to";
 const KIRYUU_PROXY_URL =
   process.env.KIRYUU_PROXY_URL || "https://proxy.akunncoc992.workers.dev/?url=";
 const YUUCDN_PROXY_URL =
@@ -3692,6 +3692,9 @@ const ALLOWED_KOMIKU_HOSTS = new Set([
   "komiku.org",
   "www.komiku.org",
   "cdn.komiku.org",
+  "komiku.to",
+  "www.komiku.to",
+  "image1.komiku.to",
 ]);
 
 function isAllowedKomikuImageUrl(url) {
@@ -3706,7 +3709,7 @@ function isAllowedKomikuImageUrl(url) {
       return true;
     }
 
-    return parsed.hostname.endsWith(".komiku.org");
+    return parsed.hostname.endsWith(".komiku.org") || parsed.hostname.endsWith(".komiku.to");
   } catch {
     return false;
   }
@@ -3732,7 +3735,7 @@ app.get("/komiku/image", async (req, res) => {
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
         Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
         "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
-        Referer: "https://komiku.org/",
+        Referer: "https://komiku.to/",
       },
     });
 
@@ -3855,126 +3858,42 @@ app.get(/^\/kiryuu\/chapter\/(.+)/, async (req, res) => {
 });
 
 app.get("/kiryuu/search", async (req, res) => {
-  const { q } = req.query;
-  if (!q) {
-    return res.status(400).json({
-      success: false,
-      message: "Masukkan parameter ?q=",
-    });
-  }
-
-  const cacheKey = `kiryuu:search:${q}`;
+  const query = String(req.query.q || "").trim();
+  if (!query) return res.status(400).json({ success: false, message: "Masukkan parameter ?q=" });
+  const cacheKey = `kiryuu:search:${query.toLowerCase()}`;
   const cached = getCache(cacheKey);
-  if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
-    return res.json(cached);
-  }
-
+  if (cached) return res.json(cached);
   try {
     const responseData = await coalescedScrape(cacheKey, async () => {
-      // 1. AMBIL NONCE VIA PROXY
-      const nonceHTML = await kiryuuFetch(
-        "https://v6.kiryuu.to/wp-admin/admin-ajax.php?type=search_form&action=get_nonce",
-        {
-          referer: "https://v6.kiryuu.to/advanced-search/",
-          timeout: 20000,
-        },
-      );
-
-      const nonceMatch = String(nonceHTML).match(/value=['"](.*?)['"]/);
-      if (!nonceMatch) throw new Error("Nonce tidak ditemukan");
-
-      const nonce = nonceMatch[1];
-
-      // 2. PARAMS SEARCH
-      const params = new URLSearchParams();
-      params.append("action", "advanced_search");
-      params.append("nonce", nonce);
-      params.append("query", q);
-      params.append("page", "1");
-      params.append("order", "desc");
-      params.append("orderby", "updated");
-      params.append("inclusion", "OR");
-      params.append("exclusion", "OR");
-      params.append("genre[]", "");
-      params.append("genre_exclude[]", "");
-      params.append("author[]", "");
-      params.append("artist[]", "");
-      params.append("type[]", "");
-      params.append("status[]", "");
-      params.append("project", "0");
-
-      // 3. REQUEST SEARCH VIA PROXY
-      const searchUrl = "https://v6.kiryuu.to/wp-admin/admin-ajax.php";
-      const proxySearchUrl =
-        `${kiryuuProxyUrl(searchUrl)}&referer=${encodeURIComponent("https://v6.kiryuu.to/advanced-search/")}`;
-
-      const { data } = await axios.post(
-        proxySearchUrl,
-        params.toString(),
-        {
-          timeout: 30000,
-          headers: {
-            ...kiryuuHeaders("https://v6.kiryuu.to/advanced-search/"),
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "X-Requested-With": "XMLHttpRequest",
-          },
-        },
-      );
-
-      // 4. PARSING
-      const $ = cheerio.load(data);
-      const results = [];
-
-      $(".flex.rounded-lg.overflow-hidden").each((_, el) => {
-        const container = $(el);
-        const link = container.find("a").first().attr("href") || "";
-        const image = kiryuuUrl(container.find("img").first().attr("src") || "").replace(
-          /^http:\/\/v6\.kiryuu\.to/i,
-          KIRYUU_BASE_URL,
-        );
-
-        const title = container.find("a.text-base").first().text().trim();
-        const latestChapter = container
-          .find("span.text-sm")
-          .first()
-          .text()
-          .trim();
-
-        const status = container.find("span.bg-accent").first().text().trim();
-        const update = latestChapter
-          ? `${latestChapter}${status ? ` • ${status}` : ""}`
-          : "";
-
-        if (title && link) {
-          results.push({
-            title,
-            image,
-            detail_link: link,
-            update,
-          });
-        }
+      const searchPageUrl = `${KIRYUU_BASE_URL}/advanced-search/`;
+      const searchPage = await kiryuuFetch(searchPageUrl, { referer: searchPageUrl, timeout: 12000 });
+      const endpointMatch = String(searchPage).match(/(?:hx-post|data-hx-post|data-url)\s*=\s*["']([^"']*wp-admin\/admin-ajax\.php\?[^"']*action=search[^"']*)["']/i);
+      if (!endpointMatch) throw new Error("Endpoint pencarian Kiryuu tidak ditemukan");
+      const searchUrl = endpointMatch[1].replace(/&#0*38;|&amp;/gi, "&").replace(/^\/+/, `${KIRYUU_BASE_URL}/`);
+      if (!/[?&]nonce=[^&]+/i.test(searchUrl)) throw new Error("Nonce pencarian Kiryuu tidak valid");
+      const proxySearchUrl = `${kiryuuProxyUrl(searchUrl)}&referer=${encodeURIComponent(searchPageUrl)}`;
+      const { data } = await axios.post(proxySearchUrl, new URLSearchParams({ query }).toString(), {
+        timeout: 12000,
+        headers: { ...kiryuuHeaders(searchPageUrl), "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "X-Requested-With": "XMLHttpRequest", "HX-Request": "true" },
       });
-
-      return {
-        success: true,
-        total: results.length,
-        query: q,
-        data: results,
-      };
+      const $ = cheerio.load(String(data));
+      const results = [];
+      const seenLinks = new Set();
+      $("#searchResults a[href*='/manga/']").each((_, element) => {
+        const item = $(element);
+        const link = kiryuuUrl(item.attr("href") || "");
+        const title = item.find("h3").first().text().trim() || item.find("img").first().attr("alt")?.trim() || "";
+        const image = kiryuuUrl(item.find("img").first().attr("src") || "");
+        const update = item.find("p").first().text().replace(/\s+/g, " ").trim();
+        if (title && link && !seenLinks.has(link)) { seenLinks.add(link); results.push({ title, image, detail_link: link, update }); }
+      });
+      return { success: true, total: results.length, query, data: results };
     });
-
-    setCache(cacheKey, responseData, 60); // 1 menit
-    res.json(responseData);
+    setCache(cacheKey, responseData, 300);
+    return res.json(responseData);
   } catch (err) {
-    console.error("❌ Kiryuu search error:", err.message);
-    res.status(200).json({
-      success: true,
-      total: 0,
-      query: q,
-      data: [],
-      warning: "Kiryuu kemungkinan block request (403)",
-    });
+    console.error("Kiryuu search error:", err.message);
+    return res.status(502).json({ success: false, total: 0, query, data: [], message: "Sumber Kiryuu tidak dapat diakses saat ini" });
   }
 });
 
@@ -4517,8 +4436,11 @@ require("./omega")(app, { getCache, setCache, coalescedScrape });
 require("./siren")(app, { getCache, setCache, coalescedScrape });
 require("./evascan")(app, { getCache, setCache, coalescedScrape });
 require("./thunder")(app, { getCache, setCache, coalescedScrape });
-
+require("./daily")(app, { getCache, setCache, coalescedScrape });
 require("./qimanga")(app, { getCache, setCache, coalescedScrape });
+require("./demon")(app, { getCache, setCache, coalescedScrape });
+require("./vortex")(app, { getCache, setCache, coalescedScrape });
+
 app.listen(PORT, () =>
   console.log(`🚀 Server jalan di http://localhost:${PORT}`),
 );

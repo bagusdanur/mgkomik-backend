@@ -498,6 +498,16 @@ async function scrapeLuvyaaSearch(query) {
 module.exports = function registerLuvyaaRoutes(app, { getCache, setCache, coalescedScrape }) {
 
   // ── IMAGE PROXY ──────────────────────────────────────
+  const LUVYAA_PLACEHOLDER_SVG = Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="400" viewBox="0 0 300 400" fill="#18181b">
+      <rect width="300" height="400" fill="#18181b"/>
+      <circle cx="150" cy="170" r="30" fill="#27272a"/>
+      <path d="M140 160l20 20M160 160l-20 20" stroke="#71717a" stroke-width="3" stroke-linecap="round"/>
+      <text x="150" y="230" text-anchor="middle" fill="#a1a1aa" font-family="system-ui, sans-serif" font-size="14" font-weight="600">Gambar Tidak Tersedia</text>
+      <text x="150" y="250" text-anchor="middle" fill="#71717a" font-family="system-ui, sans-serif" font-size="11">Luvyaa CDN 404 / expired</text>
+    </svg>`
+  );
+
   app.get("/luvyaa/image", async (req, res) => {
     const { url } = req.query;
     if (!url) {
@@ -507,66 +517,96 @@ module.exports = function registerLuvyaaRoutes(app, { getCache, setCache, coales
     try {
       const decodedUrl = decodeURIComponent(url);
       const headers = luvyaaHeaders(LUVYAA_BASE_URL + "/");
-      let imageBuffer, contentType;
+      let imageBuffer, contentType = "image/jpeg";
       const errors = [];
 
-      // Strategi 1: Worker proxy
-      const WORKER_PROXY = process.env.LUVYAA_PROXY_URL || "https://proxy.akunncoc992.workers.dev/";
-      if (WORKER_PROXY) {
-        try {
-          const workerUrl = `${WORKER_PROXY}${WORKER_PROXY.includes("?") ? "&" : "?"}url=${encodeURIComponent(decodedUrl)}&referer=${encodeURIComponent(LUVYAA_BASE_URL + "/")}`;
-          const response = await axios.get(workerUrl, {
-            responseType: "arraybuffer",
-            timeout: 15000,
-          });
-          const ct = response.headers["content-type"] || "";
-          if (ct.startsWith("image/")) {
-            imageBuffer = response.data;
-            contentType = ct;
-            console.log(`[Luvyaa Proxy] ✅ Worker proxy berhasil untuk ${decodedUrl}`);
-          } else {
-            errors.push("worker:bukan-image");
-          }
-        } catch (err) {
-          errors.push(`worker:${err.response?.status || err.message}`);
+      // Strategi 1: Direct Axios (Tercepat untuk cdn-nyaa.link & v4.luvyaa.co)
+      try {
+        const response = await axios.get(decodedUrl, {
+          headers,
+          responseType: "arraybuffer",
+          timeout: 6000,
+        });
+        const ct = response.headers["content-type"] || "";
+        if (ct.startsWith("image/") && response.data && response.data.length > 500) {
+          imageBuffer = response.data;
+          contentType = ct;
+        } else {
+          errors.push("direct:bukan-image");
         }
+      } catch (err) {
+        errors.push(`direct:${err.response?.status || err.message}`);
       }
 
-      // Strategi 2: Direct Axios
+      // Strategi 2: Cloudscraper
       if (!imageBuffer) {
         try {
-          const response = await axios.get(decodedUrl, {
+          const csResult = await cloudscraper.get({
+            uri: decodedUrl,
             headers,
-            responseType: "arraybuffer",
-            timeout: 15000,
+            encoding: null,
+            timeout: 8000,
           });
-          const ct = response.headers["content-type"] || "";
-          if (ct.startsWith("image/")) {
-            imageBuffer = response.data;
-            contentType = ct;
-            console.log(`[Luvyaa Proxy] ✅ Direct axios berhasil untuk ${decodedUrl}`);
+          if (Buffer.isBuffer(csResult) && csResult.length > 500) {
+            imageBuffer = csResult;
+            if (csResult[0] === 0xFF && csResult[1] === 0xD8) contentType = "image/jpeg";
+            else if (csResult[0] === 0x89) contentType = "image/png";
+            else if (csResult[0] === 0x52) contentType = "image/webp";
+            else if (csResult[0] === 0x47) contentType = "image/gif";
           } else {
-            errors.push("direct:bukan-image");
+            errors.push("cloudscraper:response-terlalu-kecil");
           }
         } catch (err) {
-          errors.push(`direct:${err.response?.status || err.message}`);
+          errors.push(`cloudscraper:${err.message}`);
+        }
+      }
+
+      // Strategi 3: Worker proxy
+      if (!imageBuffer) {
+        const WORKER_PROXY = process.env.LUVYAA_PROXY_URL || "https://proxy.akunncoc992.workers.dev/";
+        if (WORKER_PROXY) {
+          try {
+            const sep = WORKER_PROXY.includes("?") ? "&" : "?";
+            const workerUrl = `${WORKER_PROXY}${sep}url=${encodeURIComponent(decodedUrl)}&referer=${encodeURIComponent(LUVYAA_BASE_URL + "/")}`;
+            const response = await axios.get(workerUrl, {
+              responseType: "arraybuffer",
+              timeout: 8000,
+            });
+            const ct = response.headers["content-type"] || "";
+            if (ct.startsWith("image/") && response.data && response.data.length > 500) {
+              imageBuffer = response.data;
+              contentType = ct;
+            } else {
+              errors.push("worker:bukan-image");
+            }
+          } catch (err) {
+            errors.push(`worker:${err.response?.status || err.message}`);
+          }
         }
       }
 
       if (!imageBuffer) {
-        console.error(`[Luvyaa Proxy Error] Gagal fetch image: ${errors.join(" -> ")}`);
-        return res.status(502).send("Gagal mengambil gambar dari sumber Luvyaa");
+        console.warn(`[Luvyaa Proxy Fallback] Mengembalikan placeholder untuk ${decodedUrl} (${errors.join(" -> ")})`);
+        res.set({
+          "Content-Type": "image/svg+xml",
+          "Cache-Control": "public, max-age=86400",
+        });
+        return res.status(200).send(LUVYAA_PLACEHOLDER_SVG);
       }
 
       res.set({
         "Content-Type": contentType,
         "Content-Length": imageBuffer.length,
-        "Cache-Control": "public, max-age=31536000",
+        "Cache-Control": "public, max-age=2592000, s-maxage=2592000",
       });
       res.send(imageBuffer);
     } catch (err) {
       console.error(`[Luvyaa Proxy Error] Fatal: ${err.message}`);
-      res.status(500).send(err.message);
+      res.set({
+        "Content-Type": "image/svg+xml",
+        "Cache-Control": "public, max-age=86400",
+      });
+      res.status(200).send(LUVYAA_PLACEHOLDER_SVG);
     }
   });
 

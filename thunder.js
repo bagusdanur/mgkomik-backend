@@ -4,6 +4,7 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 
 const BASE = "https://en-thunderscans.com";
+const PROXY_URL = process.env.THUNDER_PROXY_URL || "https://proxy.kopipaitboskuh.workers.dev/?url=";
 const IMAGE_HOSTS = new Set(["en-thunderscans.com", "www.en-thunderscans.com", "i.ibb.co"]);
 const PAGE_SIZE = 24;
 let catalogCache = { expires: 0, data: null, pending: null };
@@ -23,7 +24,8 @@ function headers(referer = `${BASE}/`) {
 
 async function thunderFetch(path, options = {}) {
   const url = path.startsWith("http") ? path : `${BASE}${path.startsWith("/") ? "" : "/"}${path}`;
-  const response = await axios.get(url, {
+  const fetchUrl = `${PROXY_URL}${encodeURIComponent(url)}`;
+  const response = await axios.get(fetchUrl, {
     headers: headers(options.referer),
     timeout: options.timeout || 25000,
     responseType: options.responseType || "text",
@@ -246,7 +248,9 @@ module.exports = function registerThunder(app, { getCache, setCache, coalescedSc
       const imageUrl = normalizeImage(req.query.url);
       const parsed = new URL(imageUrl);
       if (parsed.protocol !== "https:" || !IMAGE_HOSTS.has(parsed.hostname.toLowerCase())) return res.status(400).send("URL gambar Thunder tidak valid");
-      const response = await axios.get(imageUrl, { headers: headers(BASE), responseType: "stream", timeout: 25000 });
+      const needsProxy = parsed.hostname.toLowerCase().includes("thunderscans.com");
+      const targetUrl = needsProxy ? `${PROXY_URL}${encodeURIComponent(imageUrl)}` : imageUrl;
+      const response = await axios.get(targetUrl, { headers: headers(BASE), responseType: "stream", timeout: 25000 });
       res.set({ "Content-Type": response.headers["content-type"] || "image/jpeg", ...(response.headers["content-length"] ? { "Content-Length": response.headers["content-length"] } : {}), "Cache-Control": "public, max-age=31536000" });
       response.data.pipe(res);
     } catch (error) {

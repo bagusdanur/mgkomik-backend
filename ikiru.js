@@ -1,5 +1,6 @@
 const axios = require("axios");
 const cheerio = require("cheerio");
+const cloudscraper = require("cloudscraper");
 
 const IKIRU_BASE_URL = "https://06.ikiru.wtf";
 const WORKER_PROXY = process.env.IKIRU_PROXY_URL || "https://proxy.akunncoc992.workers.dev/";
@@ -39,6 +40,16 @@ function translateTime(str) {
 module.exports = function (app, { getCache, setCache, coalescedScrape }) {
 
   // ── IMAGE PROXY ──────────────────────────────────────
+  const IKIRU_PLACEHOLDER_SVG = Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="400" viewBox="0 0 300 400" fill="#18181b">
+      <rect width="300" height="400" fill="#18181b"/>
+      <circle cx="150" cy="170" r="30" fill="#27272a"/>
+      <path d="M140 160l20 20M160 160l-20 20" stroke="#71717a" stroke-width="3" stroke-linecap="round"/>
+      <text x="150" y="230" text-anchor="middle" fill="#a1a1aa" font-family="system-ui, sans-serif" font-size="14" font-weight="600">Gambar Tidak Tersedia</text>
+      <text x="150" y="250" text-anchor="middle" fill="#71717a" font-family="system-ui, sans-serif" font-size="11">Ikiru CDN 404 / expired</text>
+    </svg>`
+  );
+
   app.get("/ikiru/image", async (req, res) => {
     const { url } = req.query;
     if (!url) {
@@ -60,19 +71,23 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
 
       // Helper: cek magic bytes
       function isValidImage(buf) {
-        if (!Buffer.isBuffer(buf) || buf.length < 500) return false;
+        if (!Buffer.isBuffer(buf) || buf.length < 12) return false;
         const head = buf.slice(0, 4);
+        const isAvif =
+          buf.length >= 12 &&
+          buf.subarray(4, 8).toString("ascii") === "ftyp" &&
+          ["avif", "avis"].includes(buf.subarray(8, 12).toString("ascii"));
         return (head[0] === 0xFF && head[1] === 0xD8) ||
                (head[0] === 0x89 && head[1] === 0x50) ||
                (head[0] === 0x52 && head[1] === 0x49) ||
-               (head[0] === 0x47 && head[1] === 0x49);
+               (head[0] === 0x47 && head[1] === 0x49) ||
+               isAvif;
       }
 
       function trySetImage(buf, ct, strategy, imgUrl) {
         if (!isValidImage(buf)) return false;
         imageBuffer = buf;
         contentType = ct.startsWith("image/") ? ct : "image/jpeg";
-        console.log(`[Ikiru Proxy] ✅ ${strategy} berhasil untuk ${imgUrl}`);
         return true;
       }
 
@@ -80,7 +95,7 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
       try {
         const response = await axios.get(imageUrl, {
           responseType: "arraybuffer",
-          timeout: 10000,
+          timeout: 6000,
           headers,
         });
         const ct = response.headers["content-type"] || "";
@@ -91,32 +106,13 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
         errors.push(`direct:${err.response?.status || err.code || err.message}`);
       }
 
-      // STRATEGI 1: Worker proxy (kalo direct kena blokir)
-      if (!imageBuffer && WORKER_PROXY) {
-        try {
-          const sep = WORKER_PROXY.includes("?") ? "&" : "?";
-          const workerUrl = `${WORKER_PROXY}${sep}url=${encodeURIComponent(imageUrl)}&referer=${encodeURIComponent("https://06.ikiru.wtf/")}`;
-          const response = await axios.get(workerUrl, {
-            responseType: "arraybuffer",
-            timeout: 15000,
-          });
-          const ct = response.headers["content-type"] || "";
-          if (!trySetImage(response.data, ct, "Worker proxy", imageUrl)) {
-            errors.push("worker:bukan-gambar-valid");
-          }
-        } catch (err) {
-          errors.push(`worker:${err.response?.status || err.code || err.message}`);
-        }
-      }
-
-      // STRATEGI 2: Cloudscraper (bypass Cloudflare)
+      // STRATEGI 1: Cloudscraper (bypass Cloudflare)
       if (!imageBuffer) {
         try {
-          const cloudscraper = require("cloudscraper");
           const csResult = await cloudscraper.get({
             uri: imageUrl,
             encoding: null,
-            timeout: 20000,
+            timeout: 8000,
             headers,
           });
           if (Buffer.isBuffer(csResult) && csResult.length > 500) {
@@ -135,20 +131,46 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
         }
       }
 
+      // STRATEGI 2: Worker proxy (kalo direct kena blokir)
+      if (!imageBuffer && WORKER_PROXY) {
+        try {
+          const sep = WORKER_PROXY.includes("?") ? "&" : "?";
+          const workerUrl = `${WORKER_PROXY}${sep}url=${encodeURIComponent(imageUrl)}&referer=${encodeURIComponent("https://06.ikiru.wtf/")}`;
+          const response = await axios.get(workerUrl, {
+            responseType: "arraybuffer",
+            timeout: 8000,
+          });
+          const ct = response.headers["content-type"] || "";
+          if (!trySetImage(response.data, ct, "Worker proxy", imageUrl)) {
+            errors.push("worker:bukan-gambar-valid");
+          }
+        } catch (err) {
+          errors.push(`worker:${err.response?.status || err.code || err.message}`);
+        }
+      }
+
       if (!imageBuffer) {
-        console.error(`[Ikiru Proxy] ❌ Semua gagal: ${errors.join(" -> ")}`);
-        return res.status(502).send(`Gagal ambil gambar: ${errors.join(" -> ")}`);
+        console.warn(`[Ikiru Proxy Fallback] Mengembalikan placeholder untuk ${imageUrl} (${errors.join(" -> ")})`);
+        res.set({
+          "Content-Type": "image/svg+xml",
+          "Cache-Control": "public, max-age=86400",
+        });
+        return res.status(200).send(IKIRU_PLACEHOLDER_SVG);
       }
 
       res.set({
         "Content-Type": contentType,
         "Content-Length": imageBuffer.length,
-        "Cache-Control": "public, max-age=86400, s-maxage=86400",
+        "Cache-Control": "public, max-age=2592000, s-maxage=2592000",
       });
       res.send(imageBuffer);
     } catch (err) {
       console.error(`[Ikiru Proxy Error] URL: ${url} | Error: ${err.message}`);
-      res.status(502).send(err.message);
+      res.set({
+        "Content-Type": "image/svg+xml",
+        "Cache-Control": "public, max-age=86400",
+      });
+      res.status(200).send(IKIRU_PLACEHOLDER_SVG);
     }
   });
 

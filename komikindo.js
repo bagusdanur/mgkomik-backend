@@ -106,8 +106,7 @@ function getRequestBaseUrl(req) {
 
 function toBackendImageUrl(url, req) {
   if (!url) return "";
-  // Menggunakan URL gambar secara langsung tanpa proxy, pastikan menggunakan HTTPS
-  return url.replace(/^http:\/\//i, "https://");
+  return `${getRequestBaseUrl(req)}/komikid/image?url=${encodeURIComponent(url)}`;
 }
 
 function rewriteImages(payload, req) {
@@ -551,6 +550,16 @@ async function scrapeSearch(query) {
 module.exports = function registerKomikindoRoutes(app, { getCache, setCache, coalescedScrape }) {
 
   // ── IMAGE PROXY ──────────────────────────────────────
+  const KOMIKID_PLACEHOLDER_SVG = Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="400" viewBox="0 0 300 400" fill="#18181b">
+      <rect width="300" height="400" fill="#18181b"/>
+      <circle cx="150" cy="170" r="30" fill="#27272a"/>
+      <path d="M140 160l20 20M160 160l-20 20" stroke="#71717a" stroke-width="3" stroke-linecap="round"/>
+      <text x="150" y="230" text-anchor="middle" fill="#a1a1aa" font-family="system-ui, sans-serif" font-size="14" font-weight="600">Gambar Tidak Tersedia</text>
+      <text x="150" y="250" text-anchor="middle" fill="#71717a" font-family="system-ui, sans-serif" font-size="11">Komikindo / manhwaindo 404</text>
+    </svg>`
+  );
+
   app.get("/komikid/image", async (req, res) => {
     const { url } = req.query;
     if (!url) {
@@ -558,31 +567,58 @@ module.exports = function registerKomikindoRoutes(app, { getCache, setCache, coa
     }
 
     try {
-      const decodedUrl = decodeURIComponent(url);
-      const reqHeaders = headers(BASE_URL + "/");
-      let imageBuffer, contentType;
-      const errors = [];
-
-      // Strategi 1: Direct Axios (Langsung tanpa worker proxy)
-      try {
-        const response = await axios.get(decodedUrl, {
-          headers: reqHeaders,
-          responseType: "arraybuffer",
-          timeout: 15000,
-        });
-        const ct = response.headers["content-type"] || "";
-        if (ct.startsWith("image/")) {
-          imageBuffer = response.data;
-          contentType = ct;
-          console.log(`[Komikindo Proxy] ✅ Direct axios berhasil untuk ${decodedUrl}`);
-        } else {
-          errors.push("direct:bukan-image");
-        }
-      } catch (err) {
-        errors.push(`direct:${err.response?.status || err.message}`);
+      let decodedUrl = decodeURIComponent(url);
+      if (decodedUrl.startsWith("http://kacu.gmbr.pro") || decodedUrl.includes(".gmbr.pro")) {
+        decodedUrl = decodedUrl.replace(/^http:\/\//i, "https://");
       }
 
-      // Strategi 2: Worker proxy
+      const reqHeaders = headers(BASE_URL + "/");
+      let imageBuffer, contentType = "image/jpeg";
+      const errors = [];
+
+      // Strategi 1: Cloudscraper (Bypass Cloudflare WAF / TLS blocking pada kacu.gmbr.pro)
+      try {
+        const csResult = await cloudscraper.get({
+          uri: decodedUrl,
+          headers: reqHeaders,
+          encoding: null,
+          timeout: 12000,
+        });
+
+        if (Buffer.isBuffer(csResult) && csResult.length > 500) {
+          imageBuffer = csResult;
+          if (csResult[0] === 0xFF && csResult[1] === 0xD8) contentType = "image/jpeg";
+          else if (csResult[0] === 0x89 && csResult[1] === 0x50) contentType = "image/png";
+          else if (csResult[0] === 0x52 && csResult[1] === 0x49) contentType = "image/webp";
+          else if (csResult[0] === 0x47 && csResult[1] === 0x49) contentType = "image/gif";
+        } else {
+          errors.push("cloudscraper:response-terlalu-kecil");
+        }
+      } catch (err) {
+        errors.push(`cloudscraper:${err.message}`);
+      }
+
+      // Strategi 2: Direct Axios
+      if (!imageBuffer) {
+        try {
+          const response = await axios.get(decodedUrl, {
+            headers: reqHeaders,
+            responseType: "arraybuffer",
+            timeout: 8000,
+          });
+          const ct = response.headers["content-type"] || "";
+          if (ct.startsWith("image/") && response.data && response.data.length > 500) {
+            imageBuffer = response.data;
+            contentType = ct;
+          } else {
+            errors.push("direct:bukan-image");
+          }
+        } catch (err) {
+          errors.push(`direct:${err.response?.status || err.message}`);
+        }
+      }
+
+      // Strategi 3: Worker proxy
       if (!imageBuffer) {
         const WORKER_PROXY = process.env.KOMIKINDO_PROXY_URL || "https://proxy.kopipaitboskuh.workers.dev/";
         if (WORKER_PROXY) {
@@ -591,13 +627,12 @@ module.exports = function registerKomikindoRoutes(app, { getCache, setCache, coa
             const workerUrl = `${WORKER_PROXY}${separator}${encodeURIComponent(decodedUrl)}&referer=${encodeURIComponent(BASE_URL + "/")}`;
             const response = await axios.get(workerUrl, {
               responseType: "arraybuffer",
-              timeout: 15000,
+              timeout: 10000,
             });
             const ct = response.headers["content-type"] || "";
-            if (ct.startsWith("image/")) {
+            if (ct.startsWith("image/") && response.data && response.data.length > 500) {
               imageBuffer = response.data;
               contentType = ct;
-              console.log(`[Komikindo Proxy] ✅ Worker proxy berhasil untuk ${decodedUrl}`);
             } else {
               errors.push("worker:bukan-image");
             }
@@ -608,19 +643,27 @@ module.exports = function registerKomikindoRoutes(app, { getCache, setCache, coa
       }
 
       if (!imageBuffer) {
-        console.error(`[Komikindo Proxy Error] Gagal fetch image: ${errors.join(" -> ")}`);
-        return res.status(502).send("Gagal mengambil gambar dari sumber Komikindo");
+        console.warn(`[Komikindo Proxy Fallback] Mengembalikan placeholder untuk ${decodedUrl} (${errors.join(" -> ")})`);
+        res.set({
+          "Content-Type": "image/svg+xml",
+          "Cache-Control": "public, max-age=86400",
+        });
+        return res.status(200).send(KOMIKID_PLACEHOLDER_SVG);
       }
 
       res.set({
         "Content-Type": contentType,
         "Content-Length": imageBuffer.length,
-        "Cache-Control": "public, max-age=31536000",
+        "Cache-Control": "public, max-age=2592000, s-maxage=2592000",
       });
       res.send(imageBuffer);
     } catch (err) {
       console.error(`[Komikindo Proxy Error] Fatal: ${err.message}`);
-      res.status(500).send(err.message);
+      res.set({
+        "Content-Type": "image/svg+xml",
+        "Cache-Control": "public, max-age=86400",
+      });
+      res.status(200).send(KOMIKID_PLACEHOLDER_SVG);
     }
   });
 

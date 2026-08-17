@@ -231,9 +231,29 @@ function parseChapter(html, seriesSlug, chapterSlug) {
     "url"
   ).map((item) => item.url);
   if (!images.length) throw new Error("Gambar chapter Eva Scans tidak ditemukan");
-  const navSlug = (selector) => chapterSlugFromHref($(selector).first().attr("href"));
-  const prev = navSlug(".reader-nav-link.prev:not(.disabled),a.nav-arrow-btn.prev:not(.disabled),a[rel='prev']") || null;
-  const next = navSlug(".reader-nav-link.next:not(.disabled),a.nav-arrow-btn.next:not(.disabled),a[rel='next']") || null;
+  // The visible next button on EvaScan may point to a site-wide release.
+  // Derive navigation only from the chapter menu of the current series.
+  const seriesPrefix = `${seriesSlug}-chapter-`.toLowerCase();
+  const chapterLinks = [...new Set(
+    $(".dropdown-list a.dropdown-item,.chapter-grid a.ch-grid-item")
+      .map((_, element) => chapterSlugFromHref($(element).attr("href")))
+      .get()
+      .filter((slug) => slug.toLowerCase().startsWith(seriesPrefix))
+  )];
+  const chapterNumber = (slug) => {
+    const match = slug.match(/-chapter-([0-9]+(?:\.[0-9]+)?)(?:-|$)/i);
+    return match ? Number(match[1]) : Number.NaN;
+  };
+  const currentNumber = chapterNumber(chapterSlug);
+  const numbered = chapterLinks
+    .map((slug) => ({ slug, number: chapterNumber(slug) }))
+    .filter((item) => Number.isFinite(item.number));
+  const prev = Number.isFinite(currentNumber)
+    ? numbered.filter((item) => item.number < currentNumber).sort((a, b) => b.number - a.number)[0]?.slug || null
+    : null;
+  const next = Number.isFinite(currentNumber)
+    ? numbered.filter((item) => item.number > currentNumber).sort((a, b) => a.number - b.number)[0]?.slug || null
+    : null;
   const heading = text($("h1,.reader-title").first().text(), text($("title").text()));
   const match = heading.match(/Chapter\s+[\d.]+/i);
   return {
