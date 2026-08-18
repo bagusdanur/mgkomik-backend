@@ -286,14 +286,27 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
             });
         }
 
+        // Detect if ikiru.wtf returned the same data as page 1 (no real pagination)
+        let hasMore = data.length > 0;
+        if (page > 1 && data.length > 0) {
+          const page1Cache = getCache('ikiru:pustaka:p:1');
+          if (page1Cache && page1Cache.data && page1Cache.data.length > 0) {
+            const page1FirstSlug = page1Cache.data[0]?.slug;
+            if (page1FirstSlug && data[0]?.slug === page1FirstSlug) {
+              hasMore = false;
+            }
+          }
+        }
+
         const result = {
           success: true,
           source: "ikiru.wtf",
           page,
           total: data.length,
+          hasMore,
           meta: {
             currentPage: page,
-            totalPages: page + 1,
+            totalPages: hasMore ? page + 1 : page,
             totalItems: data.length,
           },
           data,
@@ -568,11 +581,13 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
         const $ = cheerio.load(html);
 
         const data = [];
+        const seenUrls = new Set();
 
         $('a').each((i, el) => {
           const href = $(el).attr('href');
           
-          if (href && href.includes('/manga/') && !href.includes('chapter-')) {
+          if (href && href.includes('/manga/') && !href.includes('chapter-') && !seenUrls.has(href)) {
+            seenUrls.add(href);
             const title = $(el).find('h3, .font-medium, span').text().trim() || $(el).text().trim();
             const img = $(el).find('img').attr('src') || "";
             
