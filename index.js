@@ -4440,6 +4440,7 @@ require("./daily")(app, { getCache, setCache, coalescedScrape });
 require("./qimanga")(app, { getCache, setCache, coalescedScrape });
 require("./demon")(app, { getCache, setCache, coalescedScrape });
 require("./vortex")(app, { getCache, setCache, coalescedScrape });
+require("./mgeko")(app, { getCache, setCache, coalescedScrape });
 
 app.listen(PORT, () =>
   console.log(`🚀 Server jalan di http://localhost:${PORT}`),
