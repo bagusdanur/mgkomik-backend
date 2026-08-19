@@ -531,7 +531,7 @@ async function scrapeVortexChapter(seriesSlug, chapterSlug) {
 // 🚀 ROUTE REGISTRATION
 // =====================================================
 
-module.exports = function registerVortexRoutes(app, { getCache, setCache, coalescedScrape }) {
+module.exports = function registerVortexRoutes(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache }) {
   // ── IMAGE PROXY ──────────────────────────────────────
   app.get("/vortex/image", async (req, res) => {
     const { url } = req.query;
@@ -545,6 +545,11 @@ module.exports = function registerVortexRoutes(app, { getCache, setCache, coales
 
       if (parsed.protocol !== "https:" || !IMAGE_HOSTS.has(parsed.hostname.toLowerCase())) {
         return res.status(400).send("URL gambar Vortex tidak valid");
+      }
+
+      const cached = getImageCache(imageUrl || url);
+      if (cached) {
+        return res.set('Content-Type', cached.contentType).set('Cache-Control', 'public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800').send(cached.buffer);
       }
 
       const response = await axios.get(imageUrl, {
@@ -563,7 +568,15 @@ module.exports = function registerVortexRoutes(app, { getCache, setCache, coales
         "Cache-Control": "public, max-age=31536000",
       });
 
-      response.data.pipe(res);
+      const chunks = [];
+      response.data.on('data', c => chunks.push(c));
+      response.data.on('end', () => {
+        const buf = Buffer.concat(chunks);
+        setImageCache(imageUrl || url, buf, response.headers['content-type'] || 'image/jpeg');
+        res.set('Content-Type', response.headers['content-type'] || 'image/jpeg');
+        res.set('Cache-Control', 'public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800');
+        res.send(buf);
+      });
     } catch (err) {
       console.error(`[Vortex Proxy Error] URL: ${url} | Error: ${err.message}`);
       res.status(err.response?.status || 502).send("Gagal mengambil gambar Vortex");

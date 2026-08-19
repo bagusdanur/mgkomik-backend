@@ -547,7 +547,7 @@ async function scrapeSearch(query) {
 // 🚀 ROUTE REGISTRATION
 // =====================================================
 
-module.exports = function registerKomikindoRoutes(app, { getCache, setCache, coalescedScrape }) {
+module.exports = function registerKomikindoRoutes(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache }) {
 
   // ── IMAGE PROXY ──────────────────────────────────────
   const KOMIKID_PLACEHOLDER_SVG = Buffer.from(
@@ -570,6 +570,11 @@ module.exports = function registerKomikindoRoutes(app, { getCache, setCache, coa
       let decodedUrl = decodeURIComponent(url);
       if (decodedUrl.startsWith("http://kacu.gmbr.pro") || decodedUrl.includes(".gmbr.pro")) {
         decodedUrl = decodedUrl.replace(/^http:\/\//i, "https://");
+      }
+
+      const cached = getImageCache(decodedUrl);
+      if (cached) {
+        return res.set('Content-Type', cached.contentType).set('Cache-Control', 'public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800').send(cached.buffer);
       }
 
       const reqHeaders = headers(BASE_URL + "/");
@@ -656,6 +661,7 @@ module.exports = function registerKomikindoRoutes(app, { getCache, setCache, coa
         "Content-Length": imageBuffer.length,
         "Cache-Control": "public, max-age=2592000, s-maxage=2592000",
       });
+      setImageCache(decodedUrl, imageBuffer, contentType);
       res.send(imageBuffer);
     } catch (err) {
       console.error(`[Komikindo Proxy Error] Fatal: ${err.message}`);

@@ -241,18 +241,30 @@ async function scrapeSearch(query, page = 1) {
 async function scrapeDetail(slug) { return parseDetail(await thunderFetch(`/comics/${encodeURIComponent(slug)}/`), slug); }
 async function scrapeChapter(seriesSlug, chapterSlug) { return parseChapter(await thunderFetch(`/${encodeURIComponent(chapterSlug)}/`, { referer: `${BASE}/comics/${seriesSlug}/` }), seriesSlug, chapterSlug); }
 
-module.exports = function registerThunder(app, { getCache, setCache, coalescedScrape }) {
+module.exports = function registerThunder(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache }) {
   app.get("/thunder/image", async (req, res) => {
     if (!req.query.url) return res.status(400).send("No URL provided");
     try {
       const imageUrl = normalizeImage(req.query.url);
       const parsed = new URL(imageUrl);
       if (parsed.protocol !== "https:" || !IMAGE_HOSTS.has(parsed.hostname.toLowerCase())) return res.status(400).send("URL gambar Thunder tidak valid");
+      const cached = getImageCache(imageUrl || url);
+      if (cached) {
+        return res.set('Content-Type', cached.contentType).set('Cache-Control', 'public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800').send(cached.buffer);
+      }
       const needsProxy = parsed.hostname.toLowerCase().includes("thunderscans.com");
       const targetUrl = needsProxy ? `${PROXY_URL}${encodeURIComponent(imageUrl)}` : imageUrl;
       const response = await axios.get(targetUrl, { headers: headers(BASE), responseType: "stream", timeout: 25000 });
       res.set({ "Content-Type": response.headers["content-type"] || "image/jpeg", ...(response.headers["content-length"] ? { "Content-Length": response.headers["content-length"] } : {}), "Cache-Control": "public, max-age=31536000" });
-      response.data.pipe(res);
+      const chunks = [];
+      response.data.on('data', c => chunks.push(c));
+      response.data.on('end', () => {
+        const buf = Buffer.concat(chunks);
+        setImageCache(imageUrl || url, buf, response.headers['content-type'] || 'image/jpeg');
+        res.set('Content-Type', response.headers['content-type'] || 'image/jpeg');
+        res.set('Cache-Control', 'public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800');
+        res.send(buf);
+      });
     } catch (error) {
       console.error(`[Thunder Proxy Error] ${error.message}`);
       res.status(error.response?.status || 502).send("Gagal mengambil gambar Thunder");

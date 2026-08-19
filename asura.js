@@ -320,7 +320,7 @@ async function scrapeAsuraSearch(query, page = 1) {
 // 🚀 ROUTE REGISTRATION
 // =====================================================
 
-module.exports = function registerAsuraRoutes(app, { getCache, setCache, coalescedScrape }) {
+module.exports = function registerAsuraRoutes(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache }) {
 
   // ── IMAGE PROXY ──────────────────────────────────────
   app.get("/asura/image", async (req, res) => {
@@ -331,23 +331,32 @@ module.exports = function registerAsuraRoutes(app, { getCache, setCache, coalesc
 
     try {
       const decodedUrl = decodeURIComponent(url);
-      
+
+      const cached = getImageCache(decodedUrl);
+      if (cached) {
+        return res.set('Content-Type', cached.contentType).set('Cache-Control', 'public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800').send(cached.buffer);
+      }
+
       const response = await axios.get(decodedUrl, {
         headers: {
           "Referer": ASURA_SITE_BASE + "/",
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
         },
-        responseType: "stream",
+        responseType: "arraybuffer",
         timeout: 20000,
       });
 
+      const imageBuffer = Buffer.from(response.data);
+      const contentType = response.headers["content-type"] || "image/jpeg";
+
+      setImageCache(decodedUrl, imageBuffer, contentType);
       res.set({
-        "Content-Type": response.headers["content-type"],
-        "Content-Length": response.headers["content-length"],
+        "Content-Type": contentType,
+        "Content-Length": imageBuffer.length,
         "Cache-Control": "public, max-age=31536000",
       });
 
-      response.data.pipe(res);
+      res.send(imageBuffer);
     } catch (err) {
       console.error(`[Asura Proxy Error] URL: ${url} | Error: ${err.message}`);
       res.status(err.response?.status || 500).send(err.message);

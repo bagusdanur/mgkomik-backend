@@ -113,6 +113,8 @@ module.exports = function (app, deps) {
   const getCache = deps.getCache;
   const setCache = deps.setCache;
   const coalescedScrape = deps.coalescedScrape;
+  const getImageCache = deps.getImageCache;
+  const setImageCache = deps.setImageCache;
 
   // ─── IMAGE PROXY ────────────────────────────────────────
   app.get("/daily/image", async function (req, res) {
@@ -120,6 +122,12 @@ module.exports = function (app, deps) {
     if (!url) return res.status(400).send("No URL provided");
     try {
       const imageUrl = decodeURIComponent(url);
+
+      const cached = getImageCache(imageUrl);
+      if (cached) {
+        return res.set('Content-Type', cached.contentType).set('Cache-Control', 'public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800').send(cached.buffer);
+      }
+
       const headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/132 Safari/537.36",
         "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
@@ -194,6 +202,7 @@ module.exports = function (app, deps) {
         console.error("[Daily Proxy] Semua gagal: " + errors.join(" -> "));
         return res.status(502).send("Gagal ambil gambar: " + errors.join(" -> "));
       }
+      setImageCache(imageUrl, imageBuffer, contentType);
       res.set({ "Content-Type": contentType, "Content-Length": imageBuffer.length, "Cache-Control": "public, max-age=86400, s-maxage=86400" });
       res.send(imageBuffer);
     } catch (err) {

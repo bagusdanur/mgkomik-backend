@@ -568,7 +568,7 @@ function parsePage(value) {
 
 module.exports = function registerSirenRoutes(
   app,
-  { getCache, setCache, coalescedScrape }
+  { getCache, setCache, coalescedScrape, getImageCache, setImageCache }
 ) {
   app.get("/siren/image", async (req, res) => {
     if (!req.query.url) return res.status(400).send("No URL provided");
@@ -578,23 +578,28 @@ module.exports = function registerSirenRoutes(
       if (parsed.protocol !== "https:" || !SIREN_IMAGE_HOSTS.has(parsed.hostname)) {
         return res.status(400).send("URL gambar Siren tidak valid");
       }
+      const cached = getImageCache(imageUrl);
+      if (cached) {
+        return res.set("Content-Type", cached.contentType).set("Cache-Control", "public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800").send(cached.buffer);
+      }
       const response = await axios.get(imageUrl, {
         headers: sirenHeaders(`${SIREN_SITE_BASE}/`),
         responseType: "stream",
         timeout: 25000,
       });
-      const upstreamType = response.headers["content-type"] || "";
-      res.set({
-        "Content-Type":
-          parsed.hostname === "cdn.meowing.org" && /^text\/plain/i.test(upstreamType)
-            ? "image/jpeg"
-            : upstreamType || "image/jpeg",
-        ...(response.headers["content-length"]
-          ? { "Content-Length": response.headers["content-length"] }
-          : {}),
-        "Cache-Control": "public, max-age=31536000",
+      const chunks = [];
+      response.data.on("data", (c) => chunks.push(c));
+      response.data.on("end", () => {
+        const buf = Buffer.concat(chunks);
+        const upstreamType = response.headers["content-type"] || "";
+        const contentType = parsed.hostname === "cdn.meowing.org" && /^text\/plain/i.test(upstreamType)
+          ? "image/jpeg"
+          : upstreamType || "image/jpeg";
+        setImageCache(imageUrl, buf, contentType);
+        res.set("Content-Type", contentType);
+        res.set("Cache-Control", "public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800");
+        res.send(buf);
       });
-      response.data.pipe(res);
     } catch (error) {
       console.error(`[Siren Proxy Error] ${error.message}`);
       res.status(error.response?.status || 502).send("Gagal mengambil gambar Siren");

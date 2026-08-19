@@ -306,7 +306,7 @@ async function scrapeChapter(seriesSlug, chapterSlug) {
   );
 }
 
-module.exports = function registerEvaScan(app, { getCache, setCache, coalescedScrape }) {
+module.exports = function registerEvaScan(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache }) {
   app.get("/evascan/image", async (req, res) => {
     if (!req.query.url) return res.status(400).send("No URL provided");
     try {
@@ -315,13 +315,20 @@ module.exports = function registerEvaScan(app, { getCache, setCache, coalescedSc
       if (parsed.protocol !== "https:" || !EVA_IMAGE_HOSTS.has(parsed.hostname.toLowerCase())) {
         return res.status(400).send("URL gambar Eva Scans tidak valid");
       }
+      const cached = getImageCache(imageUrl);
+      if (cached) {
+        return res.set("Content-Type", cached.contentType).set("Cache-Control", "public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800").send(cached.buffer);
+      }
       const response = await axios.get(imageUrl, { headers: headers(EVA_BASE), responseType: "stream", timeout: 25000 });
-      res.set({
-        "Content-Type": response.headers["content-type"] || "image/jpeg",
-        ...(response.headers["content-length"] ? { "Content-Length": response.headers["content-length"] } : {}),
-        "Cache-Control": "public, max-age=31536000",
+      const chunks = [];
+      response.data.on("data", (c) => chunks.push(c));
+      response.data.on("end", () => {
+        const buf = Buffer.concat(chunks);
+        setImageCache(imageUrl, buf, response.headers["content-type"] || "image/jpeg");
+        res.set("Content-Type", response.headers["content-type"] || "image/jpeg");
+        res.set("Cache-Control", "public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800");
+        res.send(buf);
       });
-      response.data.pipe(res);
     } catch (error) {
       console.error(`[EvaScan Proxy Error] ${error.message}`);
       res.status(error.response?.status || 502).send("Gagal mengambil gambar Eva Scans");

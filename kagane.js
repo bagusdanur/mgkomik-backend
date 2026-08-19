@@ -577,7 +577,7 @@ async function scrapeChapter(seriesSlug, chapterSlug) {
   return parseChapter(payload, seriesSlug, chapterSlug);
 }
 
-module.exports = function registerKagane(app, { getCache, setCache, coalescedScrape }) {
+module.exports = function registerKagane(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache }) {
   app.get("/kagane/image", async (req, res) => {
     if (!req.query.url) return res.status(400).send("No URL provided");
     try {
@@ -586,19 +586,24 @@ module.exports = function registerKagane(app, { getCache, setCache, coalescedScr
       if (parsed.protocol !== "https:" || !isAllowedImageHost(parsed.hostname)) {
         return res.status(400).send("URL gambar Kagane tidak valid");
       }
+      const cached = getImageCache(imageUrl);
+      if (cached) {
+        return res.set("Content-Type", cached.contentType).set("Cache-Control", "public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800").send(cached.buffer);
+      }
       const response = await axios.get(imageUrl, {
         headers: headers(BASE),
         responseType: "stream",
         timeout: 25000,
       });
-      res.set({
-        "Content-Type": response.headers["content-type"] || "image/jpeg",
-        ...(response.headers["content-length"]
-          ? { "Content-Length": response.headers["content-length"] }
-          : {}),
-        "Cache-Control": "public, max-age=31536000",
+      const chunks = [];
+      response.data.on("data", (c) => chunks.push(c));
+      response.data.on("end", () => {
+        const buf = Buffer.concat(chunks);
+        setImageCache(imageUrl, buf, response.headers["content-type"] || "image/jpeg");
+        res.set("Content-Type", response.headers["content-type"] || "image/jpeg");
+        res.set("Cache-Control", "public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800");
+        res.send(buf);
       });
-      response.data.pipe(res);
     } catch (error) {
       console.error(`[Kagane Proxy Error] ${error.message}`);
       res.status(error.response?.status || 502).send("Gagal mengambil gambar Kagane");

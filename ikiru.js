@@ -37,7 +37,7 @@ function translateTime(str) {
     .replace(/ago/i, "lalu");
 }
 
-module.exports = function (app, { getCache, setCache, coalescedScrape }) {
+module.exports = function (app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache }) {
 
   // ── IMAGE PROXY ──────────────────────────────────────
   const IKIRU_PLACEHOLDER_SVG = Buffer.from(
@@ -58,6 +58,11 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
 
     try {
       const imageUrl = decodeURIComponent(url);
+
+      const cached = getImageCache(imageUrl);
+      if (cached) {
+        return res.set('Content-Type', cached.contentType).set('Cache-Control', 'public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800').send(cached.buffer);
+      }
 
       const headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
@@ -163,6 +168,7 @@ module.exports = function (app, { getCache, setCache, coalescedScrape }) {
         "Content-Length": imageBuffer.length,
         "Cache-Control": "public, max-age=2592000, s-maxage=2592000",
       });
+      setImageCache(imageUrl, imageBuffer, contentType);
       res.send(imageBuffer);
     } catch (err) {
       console.error(`[Ikiru Proxy Error] URL: ${url} | Error: ${err.message}`);

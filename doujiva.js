@@ -463,7 +463,7 @@ async function scrapeDoujivaSearch(query, page = 1) {
 // 🚀 ROUTE REGISTRATION
 // =====================================================
 
-module.exports = function registerDoujivaRoutes(app, { getCache, setCache, coalescedScrape }) {
+module.exports = function registerDoujivaRoutes(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache }) {
 
   // ── IMAGE PROXY ──────────────────────────────────────
   app.get("/doujiva/image", async (req, res) => {
@@ -478,6 +478,10 @@ module.exports = function registerDoujivaRoutes(app, { getCache, setCache, coale
       const allowedImageHost = parsedImageUrl.hostname === MANGA18_HOST || parsedImageUrl.hostname.endsWith(`.${MANGA18_HOST}`);
       if (!allowedImageHost) {
         return res.status(400).send("URL gambar Manga18 tidak valid");
+      }
+      const cached = getImageCache(decodedUrl || url);
+      if (cached) {
+        return res.set('Content-Type', cached.contentType).set('Cache-Control', 'public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800').send(cached.buffer);
       }
       const requestOptions = {
         headers: doujivaHeaders(DOUJIVA_SITE_BASE + "/"),
@@ -495,7 +499,15 @@ module.exports = function registerDoujivaRoutes(app, { getCache, setCache, coale
         "Cache-Control": "public, max-age=31536000",
       });
 
-      response.data.pipe(res);
+      const chunks = [];
+      response.data.on('data', c => chunks.push(c));
+      response.data.on('end', () => {
+        const buf = Buffer.concat(chunks);
+        setImageCache(decodedUrl || url, buf, response.headers['content-type'] || 'image/jpeg');
+        res.set('Content-Type', response.headers['content-type'] || 'image/jpeg');
+        res.set('Cache-Control', 'public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800');
+        res.send(buf);
+      });
     } catch (err) {
       console.error(`[Doujiva Proxy Error] URL: ${url} | Error: ${err.message}`);
       res.status(err.response?.status || 500).send(err.message);

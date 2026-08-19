@@ -576,7 +576,7 @@ function parsePage(value) {
 
 module.exports = function registerOmegaRoutes(
   app,
-  { getCache, setCache, coalescedScrape }
+  { getCache, setCache, coalescedScrape, getImageCache, setImageCache }
 ) {
   app.get("/omega/image", async (req, res) => {
     if (!req.query.url) return res.status(400).send("No URL provided");
@@ -586,20 +586,25 @@ module.exports = function registerOmegaRoutes(
       if (parsed.protocol !== "https:" || !OMEGA_IMAGE_HOSTS.has(parsed.hostname)) {
         return res.status(400).send("URL gambar Omega tidak valid");
       }
+      const cached = getImageCache(imageUrl);
+      if (cached) {
+        return res.set("Content-Type", cached.contentType).set("Cache-Control", "public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800").send(cached.buffer);
+      }
       const response = await axios.get(imageUrl, {
         headers: omegaHeaders(`${OMEGA_SITE_BASE}/`),
         responseType: "stream",
         timeout: 20000,
         httpsAgent: omegaPublicDnsAgent,
       });
-      res.set({
-        "Content-Type": response.headers["content-type"] || "image/jpeg",
-        ...(response.headers["content-length"]
-          ? { "Content-Length": response.headers["content-length"] }
-          : {}),
-        "Cache-Control": "public, max-age=31536000",
+      const chunks = [];
+      response.data.on("data", (c) => chunks.push(c));
+      response.data.on("end", () => {
+        const buf = Buffer.concat(chunks);
+        setImageCache(imageUrl, buf, response.headers["content-type"] || "image/jpeg");
+        res.set("Content-Type", response.headers["content-type"] || "image/jpeg");
+        res.set("Cache-Control", "public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800");
+        res.send(buf);
       });
-      response.data.pipe(res);
     } catch (error) {
       console.error(`[Omega Proxy Error] ${error.message}`);
       res.status(error.response?.status || 502).send("Gagal mengambil gambar Omega");

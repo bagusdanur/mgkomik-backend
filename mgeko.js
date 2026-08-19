@@ -477,7 +477,7 @@ async function scrapeChapter(seriesSlug, chapterSlug) {
   return parseChapter(html, seriesSlug, chapterSlug);
 }
 
-module.exports = function registerMgeko(app, { getCache, setCache, coalescedScrape }) {
+module.exports = function registerMgeko(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache }) {
   app.get("/mgeko/image", async (req, res) => {
     if (!req.query.url) return res.status(400).send("No URL provided");
     try {
@@ -485,6 +485,10 @@ module.exports = function registerMgeko(app, { getCache, setCache, coalescedScra
       const parsed = new URL(imageUrl);
       if (parsed.protocol !== "https:" || !isAllowedImageHost(parsed.hostname)) {
         return res.status(400).send("URL gambar Mgeko tidak valid");
+      }
+      const cached = getImageCache(imageUrl || url);
+      if (cached) {
+        return res.set('Content-Type', cached.contentType).set('Cache-Control', 'public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800').send(cached.buffer);
       }
       const response = await axios.get(imageUrl, {
         headers: headers(BASE),
@@ -498,7 +502,15 @@ module.exports = function registerMgeko(app, { getCache, setCache, coalescedScra
           : {}),
         "Cache-Control": "public, max-age=31536000",
       });
-      response.data.pipe(res);
+      const chunks = [];
+      response.data.on('data', c => chunks.push(c));
+      response.data.on('end', () => {
+        const buf = Buffer.concat(chunks);
+        setImageCache(imageUrl || url, buf, response.headers['content-type'] || 'image/jpeg');
+        res.set('Content-Type', response.headers['content-type'] || 'image/jpeg');
+        res.set('Cache-Control', 'public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800');
+        res.send(buf);
+      });
     } catch (error) {
       console.error(`[Mgeko Proxy Error] ${error.message}`);
       res.status(error.response?.status || 502).send("Gagal mengambil gambar Mgeko");

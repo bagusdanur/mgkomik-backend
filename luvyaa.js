@@ -495,7 +495,7 @@ async function scrapeLuvyaaSearch(query) {
 // 🚀 ROUTE REGISTRATION
 // =====================================================
 
-module.exports = function registerLuvyaaRoutes(app, { getCache, setCache, coalescedScrape }) {
+module.exports = function registerLuvyaaRoutes(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache }) {
 
   // ── IMAGE PROXY ──────────────────────────────────────
   const LUVYAA_PLACEHOLDER_SVG = Buffer.from(
@@ -516,6 +516,12 @@ module.exports = function registerLuvyaaRoutes(app, { getCache, setCache, coales
 
     try {
       const decodedUrl = decodeURIComponent(url);
+
+      const cached = getImageCache(decodedUrl);
+      if (cached) {
+        return res.set('Content-Type', cached.contentType).set('Cache-Control', 'public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800').send(cached.buffer);
+      }
+
       const headers = luvyaaHeaders(LUVYAA_BASE_URL + "/");
       let imageBuffer, contentType = "image/jpeg";
       const errors = [];
@@ -599,6 +605,7 @@ module.exports = function registerLuvyaaRoutes(app, { getCache, setCache, coales
         "Content-Length": imageBuffer.length,
         "Cache-Control": "public, max-age=2592000, s-maxage=2592000",
       });
+      setImageCache(decodedUrl, imageBuffer, contentType);
       res.send(imageBuffer);
     } catch (err) {
       console.error(`[Luvyaa Proxy Error] Fatal: ${err.message}`);
