@@ -59,6 +59,9 @@ async function kaganeFetch(path, options = {}) {
       responseType: options.responseType || "text",
       validateStatus: (status) => status >= 200 && status < 400,
     });
+    if (typeof res.data === "string" && res.data.includes("Just a moment...")) {
+      throw new Error("Cloudflare Challenge");
+    }
     return res.data;
   } catch (err) {
     errors.push(`direct:${err.response?.status || err.message}`);
@@ -80,6 +83,9 @@ async function kaganeFetch(path, options = {}) {
         responseType: options.responseType || "text",
         validateStatus: (status) => status >= 200 && status < 400,
       });
+      if (typeof res.data === "string" && res.data.includes("Just a moment...")) {
+        throw new Error("Cloudflare Challenge");
+      }
       return res.data;
     } catch (err) {
       errors.push(`worker:${err.response?.status || err.message}`);
@@ -94,6 +100,9 @@ async function kaganeFetch(path, options = {}) {
         headers: headers(options.referer),
         timeout: options.timeout || 20000,
       });
+      if (typeof csResult === "string" && csResult.includes("Just a moment...")) {
+        throw new Error("Cloudflare Challenge");
+      }
       return csResult;
     } catch (err) {
       errors.push(`cloudscraper:${err.message}`);
