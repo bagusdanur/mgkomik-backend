@@ -496,6 +496,112 @@ async function scrapeLuvyaaSearch(query) {
 }
 
 // =====================================================
+// 🎛️ SCRAPER: FILTER OPTIONS (genre / status / type / order)
+// =====================================================
+async function scrapeLuvyaaFilters() {
+  try {
+    const html = await luvyaaFetch(`/manga/?order=update`);
+    const $ = cheerio.load(html);
+
+    const collectRadios = (name) => {
+      const out = [];
+      $(`input[name="${name}"]`).each((_, el) => {
+        const value = $(el).attr("value") || "";
+        const id = $(el).attr("id");
+        const label = (id ? $(`label[for="${id}"]`).text().trim() : "") || $(el).parent().text().trim();
+        if (label) out.push({ value, label });
+      });
+      return out;
+    };
+
+    const genre = [];
+    $('input[name="genre[]"]').each((_, el) => {
+      const value = $(el).attr("value") || "";
+      const id = $(el).attr("id");
+      const label = (id ? $(`label[for="${id}"]`).text().trim() : "") || $(el).parent().text().trim();
+      if (value && label) genre.push({ value, label });
+    });
+
+    return {
+      tipe: [{ value: "", label: "Tipe" }, ...collectRadios("type").filter((o) => o.value)],
+      status: [{ value: "", label: "Status" }, ...collectRadios("status").filter((o) => o.value)],
+      genre: [{ value: "", label: "Genre 1" }, ...genre],
+      genre2: [{ value: "", label: "Genre 2" }, ...genre],
+      orderby: collectRadios("order"),
+    };
+  } catch (err) {
+    console.error("❌ Luvyaa filter scrape error:", err.message);
+    return {};
+  }
+}
+
+// =====================================================
+// 📚 SCRAPER: PUSTAKA WITH FILTER (Themesia archive)
+// =====================================================
+async function scrapeLuvyaaPustakaFilter({ orderby, tipe, genre, genre2, status, page = 1 } = {}) {
+  try {
+    const params = new URLSearchParams();
+    if (genre) params.append("genre[]", genre);
+    if (genre2) params.append("genre[]", genre2);
+    if (status) params.append("status", status);
+    if (tipe) params.append("type", tipe);
+    if (orderby) params.append("order", orderby);
+    if (page > 1) params.append("page", String(page));
+
+    const url = `/manga/?${params.toString()}`;
+    console.log("🌸 Luvyaa filter URL:", LUVYAA_BASE_URL + url);
+
+    const html = await luvyaaFetch(url);
+    const $ = cheerio.load(html);
+    const results = [];
+
+    $(".listupd .bsx").each((_, el) => {
+      const $el = $(el);
+      const link = $el.find("a[href]").first().attr("href") || "";
+      if (!link) return;
+
+      const title =
+        $el.find("a[title]").first().attr("title") ||
+        $el.find("div.tt").first().text().trim() ||
+        "";
+
+      const imgEl = $el.find("img").first();
+      let image = imgEl.attr("data-src") || imgEl.attr("data-lazy-src") || imgEl.attr("src") || "";
+      if (image.startsWith("data:image")) {
+        image = $el.find("noscript img").first().attr("src") || image;
+      }
+
+      const typeGenre = extractTypeFromClass(el, $) || $el.find("span.type").text().trim() || "";
+      const latestChapter = $el.find("div.epxs").text().trim();
+      const rating = $el.find("div.numscore").text().trim();
+
+      if (!title || !link) return;
+
+      const slug = extractSlugFromUrl(link);
+      results.push({
+        source: "luvyaa",
+        title,
+        slug,
+        image,
+        detail_link: link,
+        type_genre: typeGenre,
+        info: latestChapter || (rating ? `⭐ ${rating}` : ""),
+        chapter_terbaru: latestChapter || "",
+      });
+    });
+
+    const hasNext =
+      $(".pagination a.next, .hpage a.r").length > 0 ||
+      $(`.pagination a.page-numbers:contains("${page + 1}")`).length > 0;
+
+    return { data: results, hasMore: hasNext && results.length > 0 };
+  } catch (err) {
+    console.error("❌ Luvyaa pustaka-filter error:", err.message);
+    return { data: [], hasMore: false };
+  }
+}
+
+// =====================================================
 // 🚀 ROUTE REGISTRATION
 // =====================================================
 
@@ -727,6 +833,58 @@ module.exports = function registerLuvyaaRoutes(app, { getCache, setCache, coales
     }
   });
 
+  // ── FILTER OPTIONS ──────────────────────────────────
+  app.get("/luvyaa/filters", async (req, res) => {
+    const cacheKey = "luvyaa:filters";
+    const cached = getCache(cacheKey);
+    if (cached) {
+      console.log(`⚡ [Cache Hit] ${cacheKey}`);
+      return res.json(cached);
+    }
+
+    try {
+      const responseData = await coalescedScrape(cacheKey, async () => {
+        const data = await scrapeLuvyaaFilters();
+        return { success: true, data };
+      });
+      setCache(cacheKey, responseData, 43200); // 12 jam
+      res.json(responseData);
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // ── PUSTAKA FILTER ──────────────────────────────────
+  app.get("/luvyaa/pustaka-filter", async (req, res) => {
+    try {
+      const { orderby, tipe, genre, genre2, status } = req.query;
+      const page = Math.max(1, parseInt(req.query.page) || 1);
+
+      const cacheKey = `luvyaa:pustaka-filter:o:${orderby}:t:${tipe}:g:${genre}:g2:${genre2}:s:${status}:p:${page}`;
+      const cached = getCache(cacheKey);
+      if (cached) {
+        console.log(`⚡ [Cache Hit] ${cacheKey}`);
+        return res.json(cached);
+      }
+
+      const responseData = await coalescedScrape(cacheKey, async () => {
+        const result = await scrapeLuvyaaPustakaFilter({ orderby, tipe, genre, genre2, status, page });
+        return {
+          success: true,
+          query: { page, orderby, tipe, genre, genre2, status },
+          data: rewriteLuvyaaImages(result.data, req),
+          hasMore: result.hasMore,
+        };
+      });
+
+      setCache(cacheKey, responseData, 60); // 1 menit
+      res.json(responseData);
+    } catch (err) {
+      console.error("❌ Luvyaa pustaka-filter route error:", err.message);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
   // ── SEARCH ──────────────────────────────────────────
   app.get("/luvyaa/search", async (req, res) => {
     const { q } = req.query;
@@ -764,5 +922,5 @@ module.exports = function registerLuvyaaRoutes(app, { getCache, setCache, coales
     }
   });
 
-  console.log("✅ Luvyaa routes registered: /luvyaa/image, /luvyaa/pustaka, /luvyaa/detail/:slug, /luvyaa/chapter/:slug, /luvyaa/search");
+  console.log("✅ Luvyaa routes registered: /luvyaa/image, /luvyaa/pustaka, /luvyaa/detail/:slug, /luvyaa/chapter/:slug, /luvyaa/search, /luvyaa/filters, /luvyaa/pustaka-filter");
 };

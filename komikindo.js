@@ -548,6 +548,120 @@ async function scrapeSearch(query) {
 }
 
 // =====================================================
+// 🎛️ SCRAPER: FILTER OPTIONS (genre / status / type / order)
+// =====================================================
+// Themesia advanced-search markup:
+//   genre  -> <input type="checkbox" name="genre[]" value="ID"> <label>LABEL</label>
+//   status -> <input type="radio" name="status" value="slug"> <label>LABEL</label>
+//   type   -> <input type="radio" name="type" value="slug"> <label>LABEL</label>
+//   order  -> <input type="radio" name="order" value="slug"> <label>LABEL</label>
+async function scrapeFilters() {
+  try {
+    const html = await customFetch(`${BASE_URL}/series/?order=update`);
+    const $ = cheerio.load(html);
+
+    const collectRadios = (name) => {
+      const out = [];
+      $(`input[name="${name}"]`).each((_, el) => {
+        const value = $(el).attr("value") || "";
+        const id = $(el).attr("id");
+        const label = (id ? $(`label[for="${id}"]`).text().trim() : "") || $(el).parent().text().trim();
+        if (label) out.push({ value, label });
+      });
+      return out;
+    };
+
+    const genre = [];
+    $('input[name="genre[]"]').each((_, el) => {
+      const value = $(el).attr("value") || "";
+      const id = $(el).attr("id");
+      const label = (id ? $(`label[for="${id}"]`).text().trim() : "") || $(el).parent().text().trim();
+      if (value && label) genre.push({ value, label });
+    });
+
+    // Frontend dropdown pakai format komiku: array {value,label} dengan placeholder di index 0
+    return {
+      tipe: [{ value: "", label: "Tipe" }, ...collectRadios("type").filter((o) => o.value)],
+      status: [{ value: "", label: "Status" }, ...collectRadios("status").filter((o) => o.value)],
+      genre: [{ value: "", label: "Genre 1" }, ...genre],
+      genre2: [{ value: "", label: "Genre 2" }, ...genre],
+      orderby: collectRadios("order"),
+    };
+  } catch (err) {
+    console.error("❌ Komikindo filter scrape error:", err.message);
+    return {};
+  }
+}
+
+// =====================================================
+// 📚 SCRAPER: PUSTAKA WITH FILTER (Themesia archive)
+// =====================================================
+async function scrapePustakaFilter({ orderby, tipe, genre, genre2, status, page = 1 } = {}) {
+  try {
+    const params = new URLSearchParams();
+    // Themesia: genre[]=x&genre[]=y
+    if (genre) params.append("genre[]", genre);
+    if (genre2) params.append("genre[]", genre2);
+    if (status) params.append("status", status);
+    if (tipe) params.append("type", tipe);
+    if (orderby) params.append("order", orderby);
+    if (page > 1) params.append("page", String(page));
+
+    const url = `${BASE_URL}/series/?${params.toString()}`;
+    console.log("🌸 Komikindo filter URL:", url);
+
+    const html = await customFetch(url);
+    const $ = cheerio.load(html);
+    const results = [];
+
+    $(".listupd .bsx").each((_, el) => {
+      const $el = $(el);
+      const link = $el.find("a[href]").first().attr("href") || "";
+      if (!link) return;
+
+      const title =
+        $el.find("a[title]").first().attr("title") ||
+        $el.find("div.tt").first().text().trim() ||
+        "";
+
+      const imgEl = $el.find("img").first();
+      let image = imgEl.attr("data-src") || imgEl.attr("data-lazy-src") || imgEl.attr("src") || "";
+      if (image.startsWith("data:image")) {
+        image = $el.find("noscript img").first().attr("src") || image;
+      }
+
+      const typeGenre = extractTypeFromClass(el, $) || $el.find("span.type").text().trim() || "";
+      const latestChapter = $el.find("div.epxs").text().trim();
+      const rating = $el.find("div.numscore").text().trim();
+
+      if (!title || !link) return;
+
+      const slug = extractSlugFromUrl(link);
+      results.push({
+        source: "komikindo",
+        title,
+        slug,
+        image,
+        detail_link: link,
+        type_genre: typeGenre,
+        info: latestChapter || (rating ? `⭐ ${rating}` : ""),
+        chapter_terbaru: latestChapter || "",
+      });
+    });
+
+    // pagination: cek ada next page atau nggak
+    const hasNext =
+      $(".pagination a.next, .hpage a.r").length > 0 ||
+      $(`.pagination a.page-numbers:contains("${page + 1}")`).length > 0;
+
+    return { data: results, hasMore: hasNext && results.length > 0 };
+  } catch (err) {
+    console.error("❌ Komikindo pustaka-filter error:", err.message);
+    return { data: [], hasMore: false };
+  }
+}
+
+// =====================================================
 // 🚀 ROUTE REGISTRATION
 // =====================================================
 
@@ -783,6 +897,58 @@ module.exports = function registerKomikindoRoutes(app, { getCache, setCache, coa
     }
   });
 
+  // ── FILTER OPTIONS ──────────────────────────────────
+  app.get("/komikid/filters", async (req, res) => {
+    const cacheKey = "komikindo:filters";
+    const cached = getCache(cacheKey);
+    if (cached) {
+      console.log(`⚡ [Cache Hit] ${cacheKey}`);
+      return res.json(cached);
+    }
+
+    try {
+      const responseData = await coalescedScrape(cacheKey, async () => {
+        const data = await scrapeFilters();
+        return { success: true, data };
+      });
+      setCache(cacheKey, responseData, 43200); // 12 jam
+      res.json(responseData);
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // ── PUSTAKA FILTER ──────────────────────────────────
+  app.get("/komikid/pustaka-filter", async (req, res) => {
+    try {
+      const { orderby, tipe, genre, genre2, status } = req.query;
+      const page = Math.max(1, parseInt(req.query.page) || 1);
+
+      const cacheKey = `komikindo:pustaka-filter:o:${orderby}:t:${tipe}:g:${genre}:g2:${genre2}:s:${status}:p:${page}`;
+      const cached = getCache(cacheKey);
+      if (cached) {
+        console.log(`⚡ [Cache Hit] ${cacheKey}`);
+        return res.json(cached);
+      }
+
+      const responseData = await coalescedScrape(cacheKey, async () => {
+        const result = await scrapePustakaFilter({ orderby, tipe, genre, genre2, status, page });
+        return {
+          success: true,
+          query: { page, orderby, tipe, genre, genre2, status },
+          data: rewriteImages(result.data, req),
+          hasMore: result.hasMore,
+        };
+      });
+
+      setCache(cacheKey, responseData, 60); // 1 menit
+      res.json(responseData);
+    } catch (err) {
+      console.error("❌ Komikindo pustaka-filter route error:", err.message);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
   // ── SEARCH ──────────────────────────────────────────
   app.get("/komikid/search", async (req, res) => {
     const { q } = req.query;
@@ -820,5 +986,5 @@ module.exports = function registerKomikindoRoutes(app, { getCache, setCache, coa
     }
   });
 
-  console.log("✅ Komikindo routes registered: /komikid/image, /komikid/pustaka, /komikid/detail/:slug, /komikid/chapter/:slug, /komikid/search");
+  console.log("✅ Komikindo routes registered: /komikid/image, /komikid/pustaka, /komikid/detail/:slug, /komikid/chapter/:slug, /komikid/search, /komikid/filters, /komikid/pustaka-filter");
 };
