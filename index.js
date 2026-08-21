@@ -410,6 +410,145 @@ function convertTimeToID(text) {
     .replace(/years? ago/i, "tahun lalu");
 }
 
+// Konversi ISO timestamp (dari REST "modified") -> "X menit lalu"
+function isoToRelativeID(iso) {
+  if (!iso) return "";
+  const then = new Date(iso).getTime();
+  if (isNaN(then)) return "";
+  const diff = Math.max(0, Date.now() - then);
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return "Baru saja";
+  if (min < 60) return `${min} menit lalu`;
+  const jam = Math.floor(min / 60);
+  if (jam < 24) return `${jam} jam lalu`;
+  const hari = Math.floor(jam / 24);
+  if (hari < 30) return `${hari} hari lalu`;
+  const bulan = Math.floor(hari / 30);
+  if (bulan < 12) return `${bulan} bulan lalu`;
+  return `${Math.floor(bulan / 12)} tahun lalu`;
+}
+
+// =====================================================
+// 🎛️ KIRYUU FILTER via WP REST API
+// Kiryuu React/JS-rendered; GET/ajax HTML filter tidak jalan.
+// WP REST API terbuka: /wp-json/wp/v2/{manga,genre,manga-status,manga-type}
+// =====================================================
+async function fetchKiryuuJson(path, { timeout = 15000 } = {}) {
+  const url = `${KIRYUU_BASE_URL}${path}`;
+  const raw = await kiryuuFetch(url, { timeout });
+  return JSON.parse(String(raw));
+}
+
+async function scrapeKiryuuFilters() {
+  try {
+    const toOptions = (terms) =>
+      (Array.isArray(terms) ? terms : [])
+        .filter((t) => t && t.slug && t.name)
+        .map((t) => ({ value: t.slug, label: String(t.name).replace(/&amp;/g, "&") }));
+
+    const [genreRaw, statusRaw, typeRaw] = await Promise.all([
+      fetchKiryuuJson("/wp-json/wp/v2/genre?per_page=100&orderby=name&order=asc&_fields=id,slug,name"),
+      fetchKiryuuJson("/wp-json/wp/v2/manga-status?per_page=50&_fields=id,slug,name").catch(() => []),
+      fetchKiryuuJson("/wp-json/wp/v2/manga-type?per_page=50&_fields=id,slug,name").catch(() => []),
+    ]);
+
+    const genre = toOptions(genreRaw);
+    const status = toOptions(statusRaw).filter((o) => o.value);
+    const tipe = toOptions(typeRaw).filter((o) => o.value);
+
+    return {
+      tipe: [{ value: "", label: "Tipe" }, ...tipe],
+      status: [{ value: "", label: "Status" }, ...status],
+      genre: [{ value: "", label: "Genre 1" }, ...genre],
+      genre2: [{ value: "", label: "Genre 2" }, ...genre],
+      orderby: [
+        { value: "", label: "Default" },
+        { value: "modified", label: "Update" },
+        { value: "date", label: "Ditambahkan" },
+        { value: "title", label: "A-Z" },
+      ],
+    };
+  } catch (err) {
+    console.error("❌ Kiryuu filter scrape error:", err.message);
+    return {};
+  }
+}
+
+// Cache slug->id genre map (dipakai buat translate filter genre[] frontend)
+let kiryuuTermCache = { at: 0, genre: {}, status: {}, type: {} };
+async function getKiryuuTermMaps() {
+  if (Date.now() - kiryuuTermCache.at < 43200000 && Object.keys(kiryuuTermCache.genre).length) {
+    return kiryuuTermCache;
+  }
+  const build = (terms) => {
+    const m = {};
+    (Array.isArray(terms) ? terms : []).forEach((t) => {
+      if (t && t.slug) m[t.slug] = t.id;
+    });
+    return m;
+  };
+  const [g, s, t] = await Promise.all([
+    fetchKiryuuJson("/wp-json/wp/v2/genre?per_page=100&_fields=id,slug").catch(() => []),
+    fetchKiryuuJson("/wp-json/wp/v2/manga-status?per_page=50&_fields=id,slug").catch(() => []),
+    fetchKiryuuJson("/wp-json/wp/v2/manga-type?per_page=50&_fields=id,slug").catch(() => []),
+  ]);
+  kiryuuTermCache = { at: Date.now(), genre: build(g), status: build(s), type: build(t) };
+  return kiryuuTermCache;
+}
+
+async function scrapeKiryuuPustakaFilter({ orderby, tipe, genre, genre2, status, page = 1 } = {}) {
+  try {
+    const maps = await getKiryuuTermMaps();
+
+    const params = new URLSearchParams();
+    params.append("per_page", "24");
+    params.append("page", String(Math.max(1, page)));
+    params.append("_fields", "id,slug,link,title,modified,yoast_head_json,manga-status");
+
+    // genre[]: frontend kirim slug -> REST butuh term id
+    const genreIds = [];
+    [genre, genre2].forEach((g) => {
+      if (g && maps.genre[g]) genreIds.push(maps.genre[g]);
+    });
+    if (genreIds.length) params.append("genre", genreIds.join(","));
+
+    if (status && maps.status[status]) params.append("manga-status", maps.status[status]);
+    if (tipe && maps.type[tipe]) params.append("manga-type", maps.type[tipe]);
+
+    // orderby: default frontend "modified"/kosong -> modified (komik terbaru)
+    const ob = !orderby || orderby === "modified" ? "modified" : orderby;
+    params.append("orderby", ob);
+    params.append("order", "desc");
+
+    const arr = await fetchKiryuuJson(`/wp-json/wp/v2/manga?${params.toString()}`, { timeout: 15000 });
+    const items = Array.isArray(arr) ? arr : [];
+
+    const results = items.map((m) => {
+      const title = String(m?.title?.rendered || "").replace(/&#0?38;|&amp;/g, "&").trim();
+      const link = m?.link || `${KIRYUU_BASE_URL}/manga/${m?.slug}/`;
+      const og = m?.yoast_head_json?.og_image;
+      const image = Array.isArray(og) && og[0]?.url ? og[0].url : "";
+      return {
+        source: "kiryuu",
+        title,
+        slug: m?.slug || "",
+        image,
+        detail_link: link,
+        info: isoToRelativeID(m?.modified),
+        chapter_terbaru: "",
+      };
+    }).filter((x) => x.title && x.slug);
+
+    // hasMore: kalau balik penuh 24 item, kemungkinan ada halaman berikutnya
+    const hasMore = items.length >= 24;
+
+    return { data: results, hasMore };
+  } catch (err) {
+    console.error("❌ Kiryuu pustaka-filter error:", err.message);
+    return { data: [], hasMore: false };
+  }
+}
+
 async function scrapeKiryuuPustaka({ page = 1 } = {}) {
   try {
     const url = page === 1 ? "/latest/" : `/latest/?the_page=${page}`;
@@ -3605,6 +3744,57 @@ app.get("/kiryuu/pustaka", async (req, res) => {
     setCache(cacheKey, responseData, 60); // 1 menit
     res.json(responseData);
   } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── KIRYUU FILTER OPTIONS (via WP REST) ──────────────
+app.get("/kiryuu/filters", async (req, res) => {
+  const cacheKey = "kiryuu:filters";
+  const cached = getCache(cacheKey);
+  if (cached) {
+    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
+  }
+  try {
+    const responseData = await coalescedScrape(cacheKey, async () => {
+      const data = await scrapeKiryuuFilters();
+      return { success: true, data };
+    });
+    setCache(cacheKey, responseData, 43200); // 12 jam
+    res.json(responseData);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── KIRYUU PUSTAKA FILTER (via WP REST) ──────────────
+app.get("/kiryuu/pustaka-filter", async (req, res) => {
+  try {
+    const { orderby, tipe, genre, genre2, status } = req.query;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+
+    const cacheKey = `kiryuu:pustaka-filter:o:${orderby}:t:${tipe}:g:${genre}:g2:${genre2}:s:${status}:p:${page}`;
+    const cached = getCache(cacheKey);
+    if (cached) {
+      console.log(`⚡ [Cache Hit] ${cacheKey}`);
+      return res.json(cached);
+    }
+
+    const responseData = await coalescedScrape(cacheKey, async () => {
+      const result = await scrapeKiryuuPustakaFilter({ orderby, tipe, genre, genre2, status, page });
+      return {
+        success: true,
+        query: { page, orderby, tipe, genre, genre2, status },
+        data: rewriteKiryuuImages(result.data, req),
+        hasMore: result.hasMore,
+      };
+    });
+
+    setCache(cacheKey, responseData, 60); // 1 menit
+    res.json(responseData);
+  } catch (err) {
+    console.error("❌ Kiryuu pustaka-filter route error:", err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
