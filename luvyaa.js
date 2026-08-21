@@ -545,7 +545,11 @@ async function scrapeLuvyaaPustakaFilter({ orderby, tipe, genre, genre2, status,
     if (genre2) params.append("genre[]", genre2);
     if (status) params.append("status", status);
     if (tipe) params.append("type", tipe);
-    if (orderby) params.append("order", orderby);
+    // Default frontend "modified"/kosong -> Themesia pakai "update" (komik terbaru),
+    // bukan sort abjad. Tanpa ini no-filter malah nampilin arsip A-Z.
+    const themesiaOrder =
+      !orderby || orderby === "modified" ? "update" : orderby;
+    params.append("order", themesiaOrder);
     if (page > 1) params.append("page", String(page));
 
     const url = `/manga/?${params.toString()}`;
