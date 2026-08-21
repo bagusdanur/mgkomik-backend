@@ -79,26 +79,24 @@ setInterval(() => {
 // ==========================================
 // 🖼️ IMAGE BUFFER LRU CACHE (50MB max)
 // ==========================================
-const imageCache = new Map(); // key → { buffer, contentType, ts, size }
+const imageCache = new Map();
 let imageCacheSize = 0;
-const IMAGE_CACHE_MAX_BYTES = 50 * 1024 * 1024; // 50MB
-const IMAGE_CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 hari
+const IMAGE_CACHE_MAX_BYTES = 50 * 1024 * 1024;
+const IMAGE_CACHE_TTL = 7 * 24 * 60 * 60 * 1000;
 
 function estimateBufferSize(buf) {
   if (!buf || !Buffer.isBuffer(buf)) return 0;
-  return buf.byteLength + 200; // +200 overhead Map/entry
+  return buf.byteLength + 200;
 }
 
 function evictImageCache(neededBytes = 0) {
   const now = Date.now();
-  // Hapus expired dulu
   for (const [k, v] of imageCache) {
     if (now - v.ts > IMAGE_CACHE_TTL) {
       imageCacheSize -= v.size;
       imageCache.delete(k);
     }
   }
-  // LRU eviction kalau masih oversize
   const entries = [...imageCache.entries()].sort((a, b) => a[1].ts - b[1].ts);
   for (const [k, v] of entries) {
     if (imageCacheSize + neededBytes <= IMAGE_CACHE_MAX_BYTES) break;
@@ -116,21 +114,19 @@ function getImageCache(url) {
     imageCache.delete(url);
     return null;
   }
-  item.ts = Date.now(); // refresh LRU
+  item.ts = Date.now();
   return { buffer: item.buffer, contentType: item.contentType };
 }
 
 function setImageCache(url, buffer, contentType) {
   if (!url || !Buffer.isBuffer(buffer) || buffer.length < 512) return;
   const size = estimateBufferSize(buffer);
-  // Skip kalau satu gambar >5MB (terlalu besar untuk cache)
   if (size > 5 * 1024 * 1024) return;
   evictImageCache(size);
   imageCacheSize += size;
   imageCache.set(url, { buffer, contentType: contentType || 'image/jpeg', ts: Date.now(), size });
 }
 
-// Cleanup expired image cache setiap 10 menit
 setInterval(() => {
   const now = Date.now();
   for (const [k, v] of imageCache) {
@@ -3633,11 +3629,6 @@ app.get("/kiryuu/image", async (req, res) => {
       return res.status(400).send("URL gambar tidak valid");
     }
 
-    const cached = getImageCache(imageUrl);
-    if (cached) {
-      return res.set("Content-Type", cached.contentType).set("Cache-Control", "public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800").send(cached.buffer);
-    }
-
     const headers = {
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
       Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
@@ -3749,7 +3740,6 @@ app.get("/kiryuu/image", async (req, res) => {
       return res.status(502).send(`Gagal mengambil gambar: ${errors.join(" -> ")}`);
     }
 
-    setImageCache(imageUrl, imageBuffer, contentType);
     res.set("Content-Type", contentType);
     res.set("Cache-Control", "public, max-age=86400, s-maxage=86400");
     res.send(imageBuffer);
@@ -3797,10 +3787,6 @@ app.get("/komiku/image", async (req, res) => {
     if (!isAllowedKomikuImageUrl(imageUrl)) {
       return res.status(403).send("Image host not allowed");
     }
-    const cached = getImageCache(imageUrl);
-    if (cached) {
-      return res.set("Content-Type", cached.contentType).set("Cache-Control", "public, max-age=604800, s-maxage=604800").send(cached.buffer);
-    }
 
     const response = await axios.get(imageUrl, {
       responseType: "stream",
@@ -3814,19 +3800,22 @@ app.get("/komiku/image", async (req, res) => {
       },
     });
 
+    // Hancurkan stream jika koneksi client terputus sebelum gambar selesai diunduh
+    req.on("close", () => {
+      if (response && response.data && !response.data.destroyed) {
+        response.data.destroy();
+      }
+    });
+
     const contentType = response.headers["content-type"] || "image/jpeg";
+
     if (!contentType.startsWith("image/")) {
       return res.status(415).send("Upstream is not an image");
     }
-    // Buffer the stream for caching
-    const chunks = [];
-    for await (const chunk of response.data) chunks.push(chunk);
-    const imageBuffer = Buffer.concat(chunks);
 
-    setImageCache(imageUrl, imageBuffer, contentType);
     res.set("Content-Type", contentType);
     res.set("Cache-Control", "public, max-age=604800, s-maxage=604800");
-    res.send(imageBuffer);
+    response.data.pipe(res);
   } catch (err) {
     console.error("Komiku image proxy error:", err.message);
     res.status(502).send("Gagal mengambil gambar Komiku");
@@ -3841,11 +3830,6 @@ app.get("/doujindesu/image", async (req, res) => {
       return res.status(400).send("URL gambar Doujindesu tidak valid");
     }
 
-    const cached = getImageCache(imageUrl);
-    if (cached) {
-      return res.set('Content-Type', cached.contentType).set('Cache-Control', 'public, max-age=604800, s-maxage=604800').send(cached.buffer);
-    }
-
     const response = await axios.get(imageUrl, {
       responseType: "stream",
       timeout: 30000,
@@ -3858,20 +3842,12 @@ app.get("/doujindesu/image", async (req, res) => {
       httpsAgent: doujindesuCloudflareAgent,
     });
 
-    const chunks = [];
-    for await (const chunk of response.data) {
-      chunks.push(chunk);
-    }
-    const imageBuffer = Buffer.concat(chunks);
-    const contentType = response.headers["content-type"] || "image/webp";
-
-    setImageCache(imageUrl, imageBuffer, contentType);
-
     res.set({
-      "Content-Type": contentType,
-      "Cache-Control": "public, max-age=604800, s-maxage=604800",
+      "Content-Type": response.headers["content-type"] || "image/webp",
+      "Cache-Control": "public, max-age=86400",
     });
-    res.send(imageBuffer);
+
+    response.data.pipe(res);
   } catch (err) {
     res.status(500).send("Gagal mengambil gambar: " + err.message);
   }
@@ -4521,6 +4497,7 @@ require("./omega")(app, { getCache, setCache, coalescedScrape, getImageCache, se
 require("./siren")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 require("./evascan")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 require("./thunder")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
+require("./magus")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 require("./daily")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 require("./qimanga")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 require("./demon")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
