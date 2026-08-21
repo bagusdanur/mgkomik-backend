@@ -6,7 +6,11 @@ const IKIRU_BASE_URL = "https://06.ikiru.wtf";
 const WORKER_PROXY = process.env.IKIRU_PROXY_URL || "https://proxy.akunncoc992.workers.dev/";
 
 function getRequestBaseUrl(req) {
-  return `${req.protocol}://${req.get("host")}`;
+  const forwardedProto = req.headers["x-forwarded-proto"];
+  const proto = Array.isArray(forwardedProto)
+    ? forwardedProto[0]
+    : String(forwardedProto || req.protocol || "http").split(",")[0].trim();
+  return `${proto}://${req.get("host")}`;
 }
 
 function toIkiruBackendImageUrl(url, req) {

@@ -101,7 +101,11 @@ function extractTypeFromClass(el, $) {
 
 // Image rewriting logic
 function getRequestBaseUrl(req) {
-  return `${req.protocol}://${req.get("host")}`;
+  const forwardedProto = req.headers["x-forwarded-proto"];
+  const proto = Array.isArray(forwardedProto)
+    ? forwardedProto[0]
+    : String(forwardedProto || req.protocol || "http").split(",")[0].trim();
+  return `${proto}://${req.get("host")}`;
 }
 
 function toLuvyaaBackendImageUrl(url, req) {
