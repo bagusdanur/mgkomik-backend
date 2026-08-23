@@ -8,6 +8,7 @@ const PROXY_URL = process.env.JOSEI_PROXY_URL || "https://proxy.kopipaitboskuh.w
 const IMAGE_HOSTS = new Set(["rosyscans.id", "www.rosyscans.id", "img.rosyscans.id", "i.ibb.co"]);
 const PAGE_SIZE = 24;
 let catalogCache = { expires: 0, data: null, pending: null };
+let metadataCache = { expires: 0, data: null, pending: null };
 
 function clean(value, fallback = "") {
   return String(value ?? "").replace(/\s+/g, " ").trim() || fallback;
@@ -25,18 +26,25 @@ function headers(referer = `${BASE}/`) {
 async function joseiFetch(path, options = {}) {
   const url = path.startsWith("http") ? path : `${BASE}${path.startsWith("/") ? "" : "/"}${path}`;
   const fetchUrl = `${PROXY_URL}${encodeURIComponent(url)}`;
-  const response = await axios.get(fetchUrl, {
+  const optionsForRequest = {
     headers: headers(options.referer),
     timeout: options.timeout || 25000,
     responseType: options.responseType || "text",
     validateStatus: (status) => status >= 200 && status < 500,
-  });
-  if (response.status < 200 || response.status >= 300) {
-    const error = new Error(`Josei upstream HTTP ${response.status}`);
-    error.status = response.status;
-    throw error;
+  };
+  const errors = [];
+  for (const target of [fetchUrl, url]) {
+    try {
+      const response = await axios.get(target, optionsForRequest);
+      if (response.status >= 200 && response.status < 300) return response.data;
+      errors.push(`${target}:HTTP ${response.status}`);
+    } catch (error) {
+      errors.push(`${target}:${error.response?.status || error.code || error.message}`);
+    }
   }
-  return response.data;
+  const error = new Error(`RosyScans upstream gagal (${errors.join(" -> ")})`);
+  error.status = 502;
+  throw error;
 }
 
 function pathSlug(value = "", prefix = "") {
@@ -111,7 +119,7 @@ function parseCards(html, selector = ".bs") {
   const data = [];
   $(selector).each((_, element) => {
     const card = $(element);
-    const anchor = card.find(".bsx > a,a[href*='/manga/']").first();
+    const anchor = card.is("a") ? card : card.find(".bsx > a,a[href*='/manga/'],a.series").first();
     const slug = pathSlug(anchor.attr("href"), "manga");
     const title = clean(card.find(".tt").first().clone().children().remove().end().text(), clean(card.find("img").attr("alt")));
     if (!slug || !title || slug === "manga") return;
@@ -150,7 +158,7 @@ async function catalog() {
   if (catalogCache.data && catalogCache.expires > Date.now()) return catalogCache.data;
   if (catalogCache.pending) return catalogCache.pending;
   catalogCache.pending = (async () => {
-    const items = parseCards(await joseiFetch("/"), ".latest-updates .bs");
+    const items = parseCards(await joseiFetch("/project/"), ".listupd .bs");
     if (!items.length) throw new Error("Data komik Josei kosong");
     catalogCache = { data: items, expires: Date.now() + 120000, pending: null };
     return items;
@@ -232,10 +240,78 @@ function parseChapter(html, seriesSlug, chapterSlug) {
 }
 
 async function scrapePustaka(page = 1) { return paginate(await catalog(), page); }
+async function projectMetadata() {
+  if (metadataCache.data && metadataCache.expires > Date.now()) return metadataCache.data;
+  if (metadataCache.pending) return metadataCache.pending;
+  metadataCache.pending = (async () => {
+    const items = await catalog();
+    const enriched = [];
+    for (let offset = 0; offset < items.length; offset += 5) {
+      const batch = await Promise.all(items.slice(offset, offset + 5).map(async (item) => {
+        try {
+          const detail = (await scrapeDetail(item.slug)).data || {};
+          return {
+            ...item,
+            type: clean(detail.type, item.type_genre),
+            type_genre: clean(detail.type, item.type_genre),
+            status: clean(detail.status),
+            genres: Array.isArray(detail.genres) ? detail.genres.map((value) => clean(value)).filter(Boolean) : [],
+          };
+        } catch (error) {
+          console.warn(`[Josei Metadata] ${item.slug}: ${error.message}`);
+          return { ...item, type: item.type_genre, status: "", genres: [] };
+        }
+      }));
+      enriched.push(...batch);
+    }
+    metadataCache = { data: enriched, expires: Date.now() + 15 * 60 * 1000, pending: null };
+    return enriched;
+  })();
+  try { return await metadataCache.pending; }
+  catch (error) { metadataCache.pending = null; throw error; }
+}
+
+function optionList(items, placeholder) {
+  const values = [...new Set(items.map((value) => clean(value)).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, "id", { sensitivity: "base" }));
+  return [{ value: "", label: placeholder }, ...values.map((value) => ({ value, label: value }))];
+}
+
+async function scrapeFilters() {
+  const items = await projectMetadata();
+  const genres = items.flatMap((item) => item.genres || []);
+  return {
+    tipe: optionList(items.map((item) => item.type), "Tipe"),
+    status: optionList(items.map((item) => item.status), "Status"),
+    genre: optionList(genres, "Genre 1"),
+    genre2: optionList(genres, "Genre 2"),
+    orderby: [
+      { value: "modified", label: "Terbaru" },
+      { value: "title", label: "Judul A-Z" },
+      { value: "titlereverse", label: "Judul Z-A" },
+    ],
+  };
+}
+
+async function scrapePustakaFilter({ page = 1, orderby = "modified", tipe = "", status = "", genre = "", genre2 = "" } = {}) {
+  const equals = (left, right) => clean(left).toLowerCase() === clean(right).toLowerCase();
+  let items = (await projectMetadata()).filter((item) => {
+    if (tipe && !equals(item.type, tipe)) return false;
+    if (status && !equals(item.status, status)) return false;
+    const itemGenres = (item.genres || []).map((value) => clean(value).toLowerCase());
+    if (genre && !itemGenres.includes(clean(genre).toLowerCase())) return false;
+    if (genre2 && !itemGenres.includes(clean(genre2).toLowerCase())) return false;
+    return true;
+  });
+  if (orderby === "title") items.sort((a, b) => a.title.localeCompare(b.title, "id"));
+  if (orderby === "titlereverse") items.sort((a, b) => b.title.localeCompare(a.title, "id"));
+  return paginate(items, page);
+}
+
 async function scrapeSearch(query, page = 1) {
   const params = new URLSearchParams({ s: query });
   if (page > 1) params.set("paged", String(page));
-  const items = parseCards(await joseiFetch(`/project/?${params}`));
+  const items = parseCards(await joseiFetch(`/?${params}`), ".bs, .listupd .bs, .c-tabs-item__content, a.series");
   return { success: true, query, meta: { currentPage: page, totalPages: page, totalItems: items.length, hasNextPage: false }, data: items.map((item) => ({ title: item.title, image: item.image, detail_link: item.detail_link, type_genre: item.type_genre, update: item.chapter_terbaru, rating: "0", slug: item.slug })) };
 }
 async function scrapeDetail(slug) { return parseDetail(await joseiFetch(`/manga/${encodeURIComponent(slug)}/`), slug); }
@@ -283,6 +359,44 @@ module.exports = function registerJosei(app, { getCache, setCache, coalescedScra
     } catch (error) { console.error(`[Josei Pustaka Error] ${error.message}`); res.status(502).json({ success: false, page, total: 0, data: [], message: error.message }); }
   });
 
+  app.get("/josei/filters", async (_req, res) => {
+    const key = "josei:filters", cached = getCache(key);
+    if (cached) return res.json(cached);
+    try {
+      const response = { success: true, data: await coalescedScrape(key, scrapeFilters) };
+      setCache(key, response, 900);
+      res.json(response);
+    } catch (error) {
+      console.error(`[Josei Filters Error] ${error.message}`);
+      res.status(502).json({ success: false, data: null, message: error.message });
+    }
+  });
+
+  app.get("/josei/pustaka-filter", async (req, res) => {
+    const page = parsePage(req.query.page || "1");
+    if (!page) return res.status(400).json({ success: false, message: "Page tidak valid" });
+    const query = {
+      page,
+      orderby: clean(req.query.orderby, "modified"),
+      tipe: clean(req.query.tipe),
+      status: clean(req.query.status),
+      genre: clean(req.query.genre),
+      genre2: clean(req.query.genre2),
+    };
+    const key = `josei:pustaka-filter:o:${query.orderby}:t:${query.tipe}:s:${query.status}:g:${query.genre}:g2:${query.genre2}:p:${page}`;
+    const cached = getCache(key);
+    if (cached) return res.json(cached);
+    try {
+      const result = await coalescedScrape(key, () => scrapePustakaFilter(query));
+      const response = { success: true, source: "rosyscans.id", page, total: result.data.length, meta: result.meta, data: rewriteImages(result.data, req) };
+      setCache(key, response, 300);
+      res.json(response);
+    } catch (error) {
+      console.error(`[Josei Pustaka Filter Error] ${error.message}`);
+      res.status(502).json({ success: false, page, total: 0, data: [], message: error.message });
+    }
+  });
+
   app.get("/josei/search", async (req, res) => {
     const query = clean(req.query.q), page = parsePage(req.query.page || "1");
     if (!query) return res.status(400).json({ success: false, message: "Masukkan parameter ?q=" });
@@ -311,7 +425,7 @@ module.exports = function registerJosei(app, { getCache, setCache, coalescedScra
     catch (error) { console.error(`[Josei Chapter Error] ${seriesSlug}/${chapterSlug}: ${error.message}`); res.status(error.status === 404 ? 404 : 502).json({ success: false, message: error.message }); }
   });
 
-  console.log("Josei routes registered: /josei/pustaka, /josei/search, /josei/detail/:slug, /josei/chapter/:seriesSlug/:chapterSlug, /josei/image");
+  console.log("Josei routes registered: /josei/pustaka, /josei/filters, /josei/pustaka-filter, /josei/search, /josei/detail/:slug, /josei/chapter/:seriesSlug/:chapterSlug, /josei/image");
 };
 
-module.exports._test = { parseCards, parseDetail, parseChapter, parsePage, normalizeImage, scrapePustaka, scrapeSearch, scrapeDetail, scrapeChapter };
+module.exports._test = { parseCards, parseDetail, parseChapter, parsePage, normalizeImage, scrapePustaka, scrapeFilters, scrapePustakaFilter, scrapeSearch, scrapeDetail, scrapeChapter };
