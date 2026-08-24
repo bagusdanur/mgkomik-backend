@@ -134,7 +134,7 @@ function parseCards(html, selector = ".bs") {
       detail_link: `${BASE}/manga/${slug}/`,
       description: "",
       type_genre: card.find(".colored,.fa-palette").length ? "color" : "comic",
-      info: clean(card.find(".status").first().text(), latest.time || "Updated"),
+      info: clean(card.find(".status,.epxdate").first().text(), latest.time || "Updated"),
       chapter_awal: oldest.title || "",
       chapter_terbaru: latest.title || clean(card.find(".epxs").first().text()),
       chapters,
