@@ -14,6 +14,29 @@ function clean(value, fallback = "") {
   return String(value ?? "").replace(/\s+/g, " ").trim() || fallback;
 }
 
+function indonesiaRelativeTime(value = "") {
+  const text = clean(value);
+  if (!text) return "";
+
+  const normalized = text.toLowerCase();
+  if (normalized === "just now") return "baru saja";
+  if (normalized === "yesterday") return "1 hari lalu";
+
+  const match = normalized.match(/^(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago$/);
+  if (!match) return text;
+
+  const labels = {
+    second: "detik",
+    minute: "menit",
+    hour: "jam",
+    day: "hari",
+    week: "minggu",
+    month: "bulan",
+    year: "tahun",
+  };
+  return `${match[1]} ${labels[match[2]]} lalu`;
+}
+
 function headers(referer = `${BASE}/`) {
   return {
     Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -134,7 +157,9 @@ function parseCards(html, selector = ".bs") {
       detail_link: `${BASE}/manga/${slug}/`,
       description: "",
       type_genre: card.find(".colored,.fa-palette").length ? "color" : "comic",
-      info: clean(card.find(".status,.epxdate").first().text(), latest.time || "Updated"),
+      info: indonesiaRelativeTime(
+        clean(card.find(".status,.epxdate").first().text(), latest.time || "Updated"),
+      ),
       chapter_awal: oldest.title || "",
       chapter_terbaru: latest.title || clean(card.find(".epxs").first().text()),
       chapters,
@@ -428,4 +453,4 @@ module.exports = function registerJosei(app, { getCache, setCache, coalescedScra
   console.log("Josei routes registered: /josei/pustaka, /josei/filters, /josei/pustaka-filter, /josei/search, /josei/detail/:slug, /josei/chapter/:seriesSlug/:chapterSlug, /josei/image");
 };
 
-module.exports._test = { parseCards, parseDetail, parseChapter, parsePage, normalizeImage, scrapePustaka, scrapeFilters, scrapePustakaFilter, scrapeSearch, scrapeDetail, scrapeChapter };
+module.exports._test = { parseCards, parseDetail, parseChapter, parsePage, normalizeImage, indonesiaRelativeTime, scrapePustaka, scrapeFilters, scrapePustakaFilter, scrapeSearch, scrapeDetail, scrapeChapter };
