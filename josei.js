@@ -336,7 +336,7 @@ async function scrapePustakaFilter({ page = 1, orderby = "modified", tipe = "", 
 async function scrapeSearch(query, page = 1) {
   const params = new URLSearchParams({ s: query });
   if (page > 1) params.set("paged", String(page));
-  const items = parseCards(await joseiFetch(`/?${params}`), ".bs, .listupd .bs, .c-tabs-item__content, a.series");
+  const items = parseCards(await joseiFetch(`/?${params}`), ".listupd .bs");
   return { success: true, query, meta: { currentPage: page, totalPages: page, totalItems: items.length, hasNextPage: false }, data: items.map((item) => ({ title: item.title, image: item.image, detail_link: item.detail_link, type_genre: item.type_genre, update: item.chapter_terbaru, rating: "0", slug: item.slug })) };
 }
 async function scrapeDetail(slug) { return parseDetail(await joseiFetch(`/manga/${encodeURIComponent(slug)}/`), slug); }
