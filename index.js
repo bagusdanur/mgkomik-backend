@@ -4688,6 +4688,7 @@ require("./siren")(app, { getCache, setCache, coalescedScrape, getImageCache, se
 require("./evascan")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 require("./thunder")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 require("./magus")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
+require("./josei")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 require("./daily")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 require("./qimanga")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 require("./demon")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
