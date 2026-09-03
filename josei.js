@@ -264,7 +264,34 @@ function parseChapter(html, seriesSlug, chapterSlug) {
   };
 }
 
-async function scrapePustaka(page = 1) { return paginate(await catalog(), page); }
+async function scrapePustaka(page = 1) {
+  // Halaman /project/ hanya berisi satu page katalog. Ambil page upstream
+  // yang diminta secara langsung agar page 2+ tidak dipotong oleh cache page 1.
+  const path = page === 1 ? "/project/" : `/project/page/${page}/`;
+  const html = await joseiFetch(path);
+  const items = parseCards(html, ".listupd .bs");
+  const $ = cheerio.load(html);
+  let totalPages = page;
+
+  $("a.page-numbers").each((_, element) => {
+    const label = Number.parseInt(clean($(element).text()), 10);
+    const hrefMatch = clean($(element).attr("href")).match(/\/project\/page\/(\d+)/i);
+    const hrefPage = hrefMatch ? Number.parseInt(hrefMatch[1], 10) : 0;
+    totalPages = Math.max(totalPages, Number.isFinite(label) ? label : 0, hrefPage);
+  });
+
+  const hasNextPage = Boolean($("a.next.page-numbers").length) || page < totalPages;
+  return {
+    success: true,
+    meta: {
+      currentPage: page,
+      totalPages,
+      totalItems: totalPages > 1 ? totalPages * items.length : items.length,
+      hasNextPage,
+    },
+    data: items,
+  };
+}
 async function projectMetadata() {
   if (metadataCache.data && metadataCache.expires > Date.now()) return metadataCache.data;
   if (metadataCache.pending) return metadataCache.pending;
