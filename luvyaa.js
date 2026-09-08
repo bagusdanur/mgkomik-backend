@@ -1,6 +1,6 @@
 /**
  * =====================================================
- * 🌸 SCRAPER LUVYAA - https://v4.luvyaa.co/
+ * 🌸 SCRAPER LUVYAA - https://v5.luvyaa.co/
  * =====================================================
  * Menggunakan axios + cheerio (tanpa Puppeteer)
  * Output JSON menyamakan format scraper Kiryuu
@@ -11,7 +11,7 @@
 const axios = require("axios");
 const cheerio = require("cheerio");
 
-const LUVYAA_BASE_URL = "https://v4.luvyaa.co";
+const LUVYAA_BASE_URL = "https://v5.luvyaa.co";
 
 // ===========================
 // 🛠️ HELPER FUNCTIONS
@@ -158,8 +158,8 @@ async function scrapeLuvyaaPustaka({ page = 1 } = {}) {
   try {
     const url =
       page === 1
-        ? "https://v4.luvyaa.co/"
-        : `https://v4.luvyaa.co/page/${page}/`;
+        ? "https://v5.luvyaa.co/"
+        : `https://v5.luvyaa.co/page/${page}/`;
 
     console.log("🌸 Luvyaa pustaka URL:", url);
 
@@ -640,7 +640,7 @@ module.exports = function registerLuvyaaRoutes(app, { getCache, setCache, coales
       let imageBuffer, contentType = "image/jpeg";
       const errors = [];
 
-      // Strategi 1: Direct Axios (Tercepat untuk cdn-nyaa.link & v4.luvyaa.co)
+      // Strategi 1: Direct Axios (Tercepat untuk cdn-nyaa.link & v5.luvyaa.co)
       try {
         const response = await axios.get(decodedUrl, {
           headers,
@@ -758,7 +758,7 @@ module.exports = function registerLuvyaaRoutes(app, { getCache, setCache, coales
 
         return {
           success: true,
-          source: "v4.luvyaa.co",
+          source: "v5.luvyaa.co",
           page,
           total: result.data.length,
           meta: result.meta,
