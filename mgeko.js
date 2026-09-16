@@ -2,9 +2,19 @@
 
 const axios = require("axios");
 const cheerio = require("cheerio");
+const https = require("https");
 
 const BASE = "https://www.mgeko.cc";
 const PER_PAGE = 24;
+
+// Agent keep-alive khusus Mgeko: kurangi TIME_WAIT & port exhaustion
+const mgekoAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 16,
+  maxFreeSockets: 4,
+  timeout: 30000,
+  freeSocketTimeout: 20000,
+});
 
 function isAllowedImageHost(hostname) {
   const host = String(hostname || "").toLowerCase();
@@ -34,21 +44,41 @@ async function mgekoFetch(path, options = {}) {
   const url = path.startsWith("http")
     ? path
     : `${BASE}${path.startsWith("/") ? "" : "/"}${path}`;
-  const response = await axios.get(url, {
-    headers: {
-      ...headers(options.referer),
-      ...(options.headers || {}),
-    },
-    timeout: options.timeout || 25000,
-    responseType: options.responseType || "text",
-    validateStatus: (status) => status >= 200 && status < 500,
-  });
-  if (response.status < 200 || response.status >= 300) {
-    const error = new Error(`Mgeko upstream HTTP ${response.status}`);
-    error.status = response.status;
-    throw error;
+  const attempts = options.attempts || 3;
+  const timeout = options.timeout || 25000;
+  let lastError;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await axios.get(url, {
+        headers: {
+          ...headers(options.referer),
+          ...(options.headers || {}),
+        },
+        timeout,
+        httpsAgent: mgekoAgent,
+        responseType: options.responseType || "text",
+        validateStatus: (status) => status >= 200 && status < 500,
+      });
+      if (response.status < 200 || response.status >= 300) {
+        const error = new Error(`Mgeko upstream HTTP ${response.status}`);
+        error.status = response.status;
+        // 4xx = permanen (kecuali 408/429), jangan retry
+        if (response.status < 500 && ![408, 429].includes(response.status)) throw error;
+        lastError = error;
+      } else {
+        return response.data;
+      }
+    } catch (error) {
+      lastError = error;
+      if (error.status && error.status < 500 && ![408, 429].includes(error.status)) throw error;
+    }
+    if (attempt < attempts) {
+      const delay = Math.min(6000, 700 * 2 ** (attempt - 1)) + Math.random() * 300;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
   }
-  return response.data;
+  throw lastError;
 }
 
 function text(value, fallback = "") {
@@ -494,6 +524,7 @@ module.exports = function registerMgeko(app, { getCache, setCache, coalescedScra
         headers: headers(BASE),
         responseType: "stream",
         timeout: 25000,
+        httpsAgent: mgekoAgent,
       });
       res.set({
         "Content-Type": response.headers["content-type"] || "image/jpeg",

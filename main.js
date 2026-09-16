@@ -993,10 +993,19 @@ async function scrapeNekopoiDetail(url) {
 // ─────────────────────────────────────────────────────────────────────────────
 // ANICHIN CONFIG
 // ─────────────────────────────────────────────────────────────────────────────
-const ANICHIN_BASE_URL = "https://anichin.cafe";
- 
+const ANICHIN_BASE_URL = "https://anichin.moe";
+// Domain cadangan: anichin.cafe sudah mati (redirect loop HTTPS->HTTP).
+// Daftar mirror diambil dari halaman resmi anichin.site.
+const ANICHIN_MIRRORS = [
+  "https://anichin.moe",
+  "https://anichin.my.id",
+  "https://anichin.vip",
+  "https://anichin.top",
+];
+
 const axiosAnichin = axios.create({
-  timeout: 10000,
+  timeout: 20000,
+  maxRedirects: 3,
   headers: {
     Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -1022,6 +1031,31 @@ async function fetchAnichin(url, retries = 2) {
     return fetchAnichin(url, retries - 1);
   }
 }
+
+// Failover: kalau base utama mati/redirect loop, coba mirror lain & ingat yang berhasil.
+let activeAnichinBase = ANICHIN_BASE_URL;
+
+async function fetchAnichinUrl(path) {
+  const candidates = [activeAnichinBase, ...ANICHIN_MIRRORS.filter((m) => m !== activeAnichinBase)];
+  let lastError;
+  for (const base of candidates) {
+    const url = `${base}${path}`;
+    try {
+      const res = await axiosAnichin.get(url, {
+        headers: { "User-Agent": randomUA(), Referer: `${base}/` },
+      });
+      if (base !== activeAnichinBase) {
+        console.log(`✅ Anichin failover ke ${base}`);
+        activeAnichinBase = base;
+      }
+      return { res, base };
+    } catch (error) {
+      lastError = error;
+      console.log(`⚠️ Anichin ${base} gagal [${error.response?.status || error.code}], coba mirror berikutnya`);
+    }
+  }
+  throw lastError;
+}
  
 // ─────────────────────────────────────────────────────────────────────────────
 // ANICHIN SCRAPER - TERBARU (Latest Release only)
@@ -1030,11 +1064,9 @@ async function fetchAnichin(url, retries = 2) {
 // ─────────────────────────────────────────────────────────────────────────────
 async function scrapeAnichinTerbaru(page = 1) {
   try {
-    const url = page <= 1
-      ? `${ANICHIN_BASE_URL}/`
-      : `${ANICHIN_BASE_URL}/page/${page}/`;
- 
-    const res = await fetchAnichin(url);
+    const path = page <= 1 ? "/" : `/page/${page}/`;
+
+    const { res } = await fetchAnichinUrl(path);
     const $ = cheerio.load(res.data);
  
     // Selalu ambil dari .releases.latesthome — ada di semua page
@@ -1119,8 +1151,7 @@ async function scrapeAnichinTerbaru(page = 1) {
 
 async function scrapeAnichinEpisode(slug) {
   try {
-    const url = `${ANICHIN_BASE_URL}/${slug}/`;
-    const res = await fetchAnichin(url);
+    const { res } = await fetchAnichinUrl(`/${slug}/`);
     const $ = cheerio.load(res.data);
  
     // ── THUMBNAIL ─────────────────────────────────────────────────────────
@@ -1280,8 +1311,7 @@ async function scrapeAnichinEpisode(slug) {
 
 async function scrapeAnichinSeri(slug) {
   try {
-    const url = `${ANICHIN_BASE_URL}/seri/${slug}/`;
-    const res = await fetchAnichin(url);
+    const { res } = await fetchAnichinUrl(`/seri/${slug}/`);
     const $ = cheerio.load(res.data);
  
     // ── THUMBNAIL ─────────────────────────────────────────────────────────
@@ -1403,11 +1433,11 @@ async function scrapeAnichinSeri(slug) {
 async function scrapeAnichinSearch(query, page = 1) {
   try {
     const encodedQuery = encodeURIComponent(query);
-    const url = page <= 1
-      ? `${ANICHIN_BASE_URL}/?s=${encodedQuery}`
-      : `${ANICHIN_BASE_URL}/page/${page}/?s=${encodedQuery}`;
+    const path = page <= 1
+      ? `/?s=${encodedQuery}`
+      : `/page/${page}/?s=${encodedQuery}`;
 
-    const res = await fetchAnichin(url);
+    const { res } = await fetchAnichinUrl(path);
     const $ = cheerio.load(res.data);
     const items = [];
 

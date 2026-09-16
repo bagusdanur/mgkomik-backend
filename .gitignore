@@ -3,3 +3,6 @@ node_modules/
 .env*.local
 scratch/
 workers/
+.env
+*.pre-*
+*.before-*

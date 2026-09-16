@@ -1796,6 +1796,34 @@ async function doujindesuApiGet(path, params = {}) {
   return { data: responseData, headers: response.headers };
 }
 
+// Beberapa CDN gambar punya cert yang tidak match hostname (server salah konfigurasi).
+// Proxy ini hanya mengambil gambar publik read-only -> verifikasi hostname dilonggarkan
+// HANYA untuk host yang terdaftar di bawah.
+function agentForImageUrl(imageUrl) {
+  try {
+    const host = new URL(imageUrl).hostname;
+    return TLS_BROKEN_HOSTS.has(host) ? lenientTlsAgent : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const TLS_BROKEN_HOSTS = new Set([
+  "img2.komiku.org",
+  "uploadcdn.lonedev.my.id",
+  "storage1.is.cc",
+  "storage2.is.cc",
+  "storage3.is.cc",
+]);
+
+const lenientTlsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 24,
+  maxFreeSockets: 6,
+  timeout: 30000,
+  rejectUnauthorized: false,
+});
+
 const doujindesuCloudflareAgent = new https.Agent({
   lookup: (hostname, options, callback) => {
     if (hostname === "doujin.desu.xxx") {
@@ -3855,6 +3883,7 @@ app.get("/kiryuu/image", async (req, res) => {
           responseType: "arraybuffer",
           timeout: 10000,
           headers,
+          httpsAgent: agentForImageUrl(imageUrl),
         });
         const ct = response.headers["content-type"] || "";
         if (!trySetImage(response.data, ct, "Direct fetch", imageUrl)) {
@@ -3908,6 +3937,7 @@ app.get("/kiryuu/image", async (req, res) => {
           encoding: null,
           timeout: 20000,
           headers,
+          agent: agentForImageUrl(imageUrl),
         });
         if (Buffer.isBuffer(csResult) && csResult.length > 500) {
           if (trySetImage(csResult, "image/jpeg", "Cloudscraper", imageUrl)) {
@@ -3981,6 +4011,7 @@ app.get("/komiku/image", async (req, res) => {
     const response = await axios.get(imageUrl, {
       responseType: "stream",
       timeout: 30000,
+      httpsAgent: agentForImageUrl(imageUrl),
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
