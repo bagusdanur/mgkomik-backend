@@ -2256,9 +2256,49 @@ function parseSekteListItems($) {
   return results;
 }
 
-async function scrapeSekteTerbaru({ page = 1 } = {}) {
+function parseSekteFilters($) {
+  const readCheckboxOptions = (name) => {
+    const options = [];
+    $(`input[name='${name}'], input[name='${name}[]']`).each((_, el) => {
+      const input = $(el);
+      const value = String(input.attr("value") || "").trim();
+      const id = input.attr("id");
+      const label = (id ? $(`label[for='${id}']`).first().text() : "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (value && label && !options.some((option) => option.value === value)) {
+        options.push({ value, label });
+      }
+    });
+    return options;
+  };
+
+  const genre = readCheckboxOptions("genre");
+  const tipe = readCheckboxOptions("type");
+  const status = readCheckboxOptions("status");
+
+  return {
+    tipe: [{ value: "", label: "Tipe" }, ...tipe],
+    status: [{ value: "", label: "Status" }, ...status],
+    genre: [{ value: "", label: "Genre" }, ...genre],
+    genre2: [{ value: "", label: "Genre 2" }, ...genre],
+  };
+}
+
+async function scrapeSekteFilters() {
+  const html = await sekteFetch("/manga/");
+  return parseSekteFilters(cheerio.load(html));
+}
+
+async function scrapeSekteTerbaru({ page = 1, orderby = "update", tipe = "", genre = "", genre2 = "", status = "" } = {}) {
   try {
-    const latestPath = page === 1 ? "/manga/?order=update" : `/manga/?page=${page}&order=update`;
+    const params = new URLSearchParams();
+    params.set("order", !orderby || orderby === "modified" ? "update" : orderby);
+    if (tipe) params.append("type[]", tipe);
+    if (status) params.append("status[]", status);
+    [genre, genre2].filter(Boolean).forEach((value) => params.append("genre[]", value));
+    if (page > 1) params.set("page", String(page));
+    const latestPath = `/manga/?${params.toString()}`;
     const html = await sekteFetch(latestPath);
     const $ = cheerio.load(html);
     const results = parseSekteListItems($);
@@ -2594,16 +2634,48 @@ async function scrapeSekteChapter(slug) {
   }
 }
 
-async function scrapeDoujindesuTerbaru({ page = 1, type = "doujinshi,manga,manhwa" } = {}) {
+async function scrapeDoujindesuFilters() {
+  const response = await doujindesuApiGet("/api/genres", {});
+  const items = Array.isArray(response.data) ? response.data : Object.values(response.data || {});
+  const genre = items
+    .filter((item) => item?.slug && item?.name)
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+    .map((item) => ({ value: String(item.slug), label: String(item.name) }));
+
+  return {
+    tipe: [
+      { value: "", label: "Tipe" },
+      { value: "doujinshi,manga,manhwa", label: "Semua" },
+      { value: "doujinshi", label: "Doujinshi" },
+      { value: "manga", label: "Manga" },
+      { value: "manhwa", label: "Manhwa" },
+    ],
+    status: [
+      { value: "", label: "Status" },
+      { value: "completed", label: "Completed" },
+      { value: "publishing", label: "Publishing" },
+      { value: "ongoing", label: "Ongoing" },
+    ],
+    genre: [{ value: "", label: "Genre" }, ...genre],
+    genre2: [{ value: "", label: "Genre 2" }, ...genre],
+  };
+}
+
+async function scrapeDoujindesuTerbaru({ page = 1, type = "doujinshi,manga,manhwa", status = "", genre = "", genre2 = "" } = {}) {
   try {
     const limit = 12;
     const offset = (page - 1) * limit;
 
-    const response = await doujindesuApiGet("/api/manga", {
+    const params = {
       limit,
       offset,
       type
-    });
+    };
+    if (status) params.status = status;
+    const selectedGenres = [genre, genre2].filter(Boolean);
+    if (selectedGenres.length) params.genre = selectedGenres.join(",");
+
+    const response = await doujindesuApiGet("/api/manga", params);
 
     const items = response.data;
     const totalCount = parseInt(response.headers["x-total-count"] || "0", 10);
@@ -2633,7 +2705,7 @@ async function scrapeDoujindesuTerbaru({ page = 1, type = "doujinshi,manga,manhw
         detail_link: detailLink,
         description: item.description || "",
         type_genre: typeGenre,
-        genres: [],
+        genres: (item.manga_genres || []).map((relation) => relation?.genres?.name).filter(Boolean),
         info,
         update: chapterTitle,
         chapter_terbaru: chapterTitle,
@@ -4212,6 +4284,42 @@ app.get(
   },
 );
 
+app.get("/doujindesu/filters", async (_req, res) => {
+  const cacheKey = "doujindesu:filters";
+  const cached = getCache(cacheKey);
+  if (cached) return res.json(cached);
+
+  try {
+    const data = await coalescedScrape(cacheKey, scrapeDoujindesuFilters);
+    const result = { success: true, data };
+    setCache(cacheKey, result, 86400);
+    return res.json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/doujindesu/pustaka-filter", async (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const type = String(req.query.tipe || "doujinshi,manga,manhwa");
+  const status = String(req.query.status || "");
+  const genre = String(req.query.genre || "");
+  const genre2 = String(req.query.genre2 || "");
+  const cacheKey = `doujindesu:filter:type:${type}:status:${status}:g:${genre}:g2:${genre2}:p:${page}`;
+  const cached = getCache(cacheKey);
+  if (cached) return res.json(cached);
+
+  try {
+    const result = await coalescedScrape(cacheKey, () => scrapeDoujindesuTerbaru({ page, type, status, genre, genre2 }));
+    if (!result.success) return res.status(500).json(result);
+    const mappedResult = rewriteDoujindesuImages(result, req);
+    setCache(cacheKey, mappedResult, 300);
+    return res.json(mappedResult);
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.get(
   ["/sekte/terbaru", "/sekte/pustaka", "/sektedoujin/terbaru", "/sektedoujin/pustaka"],
   async (req, res) => {
@@ -4237,6 +4345,45 @@ app.get(
     }
   },
 );
+
+app.get(["/sekte/filters", "/sektedoujin/filters"], async (_req, res) => {
+  const cacheKey = "sekte:filters";
+  const cached = getCache(cacheKey);
+  if (cached) return res.json(cached);
+
+  try {
+    const data = await coalescedScrape(cacheKey, scrapeSekteFilters);
+    const result = { success: true, data };
+    setCache(cacheKey, result, 86400);
+    return res.json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get(["/sekte/pustaka-filter", "/sektedoujin/pustaka-filter"], async (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const query = {
+    page,
+    orderby: String(req.query.orderby || "update"),
+    tipe: String(req.query.tipe || ""),
+    genre: String(req.query.genre || ""),
+    genre2: String(req.query.genre2 || ""),
+    status: String(req.query.status || ""),
+  };
+  const cacheKey = `sekte:filter:o:${query.orderby}:t:${query.tipe}:g:${query.genre}:g2:${query.genre2}:s:${query.status}:p:${page}`;
+  const cached = getCache(cacheKey);
+  if (cached) return res.json(cached);
+
+  try {
+    const result = await coalescedScrape(cacheKey, () => scrapeSekteTerbaru(query));
+    if (!result.success) return res.status(500).json(result);
+    setCache(cacheKey, result, 300);
+    return res.json(result);
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 app.get(["/sekte/detail/:slug", "/sektedoujin/detail/:slug"], async (req, res) => {
   const { slug } = req.params;
