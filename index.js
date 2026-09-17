@@ -959,11 +959,13 @@ async function scrapeKomikuPopuler(tipe = "semua") {
     const $ = cheerio.load(data);
     const results = [];
 
-    // Semua artikel ada di satu container, difilter lewat data-tipe
+    // Semua artikel ada di satu container (#ls12-baru), difilter lewat data-tipe
+    // Catatan: komiku.org tidak lagi punya #Komik_Populer; section populer/rekomendasi
+    // sekarang ada di #ls12-baru (di dalam #Rekomendasi_Komik).
     const selector =
       tipe === "semua"
-        ? "#Komik_Populer article.ls2"
-        : `#Komik_Populer article.ls2[data-tipe="${tipe}"]`;
+        ? "#ls12-baru article.ls2"
+        : `#ls12-baru article.ls2[data-tipe="${tipe}"]`;
 
     $(selector).each((_, el) => {
       const element = $(el);
@@ -977,12 +979,13 @@ async function scrapeKomikuPopuler(tipe = "semua") {
 
       const title = element.find(".ls2j h3 a").text().trim();
 
-      // Format: "Fantasi · 1.3jt views"
+      // Format di #ls12-baru hanya genre, contoh: "Fantasi" (tanpa views).
+      // Halaman komiku.org tidak lagi mengekspos jumlah views di section ini,
+      // jadi nilai kosong lebih jujur daripada string palsu.
       const ls2tRaw = element.find(".ls2t").text().trim();
       const ls2tParts = ls2tRaw.split("·").map((s) => s.trim());
       const genre = ls2tParts[0] || "";
       const views = ls2tParts[1] || "";
-
       const chapterEl = element.find(".ls2j a.ls2l");
       const chapterTitle = chapterEl.text().trim();
       const chapterLink = chapterEl.attr("href") || "";
@@ -3473,6 +3476,28 @@ app.get("/komiku/home", async (_, res) => {
         },
       };
     });
+
+    // Guard: kalau semua seksi kosong, jangan simpan/balas sebagai sukses.
+    // Mencegah perubahan struktur situs lolos diam-diam (pernah terjadi:
+    // #Komik_Populer hilang -> populer_* kosong tapi tetap 200 OK).
+    const d = responseData.data;
+    const totalItems =
+      (d.terbaru?.length || 0) +
+      (d.populer_manga?.length || 0) +
+      (d.populer_manhwa?.length || 0) +
+      (d.populer_manhua?.length || 0);
+
+    if (totalItems === 0) {
+      console.error("❌ [Home] Semua seksi kosong - selector mungkin sudah usang");
+      return res.status(502).json({
+        success: false,
+        message: "Gagal mengambil data home (semua sumber kosong)",
+      });
+    }
+
+    if ((d.populer_manga?.length || 0) === 0) {
+      console.warn("⚠️ [Home] populer_manga kosong - cek selector scrapeKomikuPopuler");
+    }
 
     setCache(cacheKey, responseData, 60); // 1 menit (60 detik)
     res.json(responseData);
