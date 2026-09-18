@@ -5,7 +5,14 @@ const cheerio = require("cheerio");
 
 const BASE = "https://rosyscans.id";
 const PROXY_URL = process.env.JOSEI_PROXY_URL || "https://proxy.kopipaitboskuh.workers.dev/?url=";
-const IMAGE_HOSTS = new Set(["rosyscans.id", "www.rosyscans.id", "img.rosyscans.id", "i.ibb.co"]);
+const IMAGE_HOSTS = new Set([
+  "rosyscans.id",
+  "www.rosyscans.id",
+  "img.rosyscans.id",
+  "rosyscans.com",
+  "www.rosyscans.com",
+  "i.ibb.co",
+]);
 const PAGE_SIZE = 24;
 let catalogCache = { expires: 0, data: null, pending: null };
 let metadataCache = { expires: 0, data: null, pending: null };
