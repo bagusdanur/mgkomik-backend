@@ -1697,6 +1697,25 @@ const DOUJINDESU_CF_IP = "104.26.8.62";
 const DOUJINDESU_IMAGE_PROBE_BATCH_SIZE = 16;
 const DOUJINDESU_IMAGE_CACHE_TTL = 1000 * 60 * 30;
 const doujindesuImageCache = new Map();
+const DOUJINDESU_IMAGE_HOSTS = new Set([
+  "desu.photos",
+  "desu.pics",
+  "pic.desu.xxx",
+  "doujin.desu.xxx",
+]);
+
+function isAllowedDoujindesuImageUrl(value) {
+  try {
+    const parsed = new URL(String(value || ""));
+    if (parsed.protocol !== "https:") return false;
+    const hostname = parsed.hostname.toLowerCase();
+    return [...DOUJINDESU_IMAGE_HOSTS].some(
+      (allowed) => hostname === allowed || hostname.endsWith(`.${allowed}`),
+    );
+  } catch {
+    return false;
+  }
+}
 
 // Helper to format ISO date strings to Indonesian relative time
 function timeAgo(dateStr) {
@@ -4144,7 +4163,7 @@ app.get("/doujindesu/image", async (req, res) => {
   try {
     const imageUrl = req.query.url;
 
-    if (!imageUrl || !(imageUrl.includes("desu.photos") || imageUrl.includes("doujin.desu.xxx"))) {
+    if (!isAllowedDoujindesuImageUrl(imageUrl)) {
       return res.status(400).send("URL gambar Doujindesu tidak valid");
     }
 
@@ -4898,6 +4917,8 @@ require("./demon")(app, { getCache, setCache, coalescedScrape, getImageCache, se
 require("./vortex")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 require("./mgeko")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 require("./kagane")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
+require("./lua")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
+require("./mgread")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 
 app.listen(PORT, () =>
   console.log(`🚀 Server jalan di http://localhost:${PORT}`),
