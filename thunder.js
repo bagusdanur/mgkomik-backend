@@ -159,6 +159,44 @@ async function catalog() {
   catch (error) { catalogCache.pending = null; throw error; }
 }
 
+// Sort "Added" listing: newest series first. The cards carry no release time,
+// so the RSS feed is folded in as a best-effort `published_at`.
+const LATEST_PATH = "/comics/?status=&type=&order=latest";
+let latestCache = { expires: 0, data: null, pending: null };
+
+function rssBySlug(xml) {
+  const $ = cheerio.load(xml, { xmlMode: true });
+  const found = {};
+  $("item").each((_, element) => {
+    const slug = pathSlug(clean($(element).find("link").first().text()), "comics");
+    const date = clean($(element).find("pubDate").first().text());
+    if (slug && date && !found[slug]) found[slug] = date;
+  });
+  return found;
+}
+
+function isoDate(value) {
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? "" : new Date(parsed).toISOString();
+}
+
+async function latestCatalog() {
+  if (latestCache.data && latestCache.expires > Date.now()) return latestCache.data;
+  if (latestCache.pending) return latestCache.pending;
+  latestCache.pending = (async () => {
+    const items = parseCards(await thunderFetch(LATEST_PATH), ".listupd .bs");
+    if (!items.length) throw new Error("Data komik Thunder terbaru kosong");
+    let published = {};
+    try { published = rssBySlug(await thunderFetch("/comics/feed/", { timeout: 15000 })); }
+    catch (error) { console.error(`[Thunder Latest RSS Error] ${error.message}`); }
+    const data = items.map((item) => ({ ...item, published_at: isoDate(published[item.slug] || "") }));
+    latestCache = { data, expires: Date.now() + 120000, pending: null };
+    return data;
+  })();
+  try { return await latestCache.pending; }
+  catch (error) { latestCache.pending = null; throw error; }
+}
+
 function infoValue($, label) {
   const target = label.toLowerCase();
   let result = "";
@@ -232,6 +270,7 @@ function parseChapter(html, seriesSlug, chapterSlug) {
 }
 
 async function scrapePustaka(page = 1) { return paginate(await catalog(), page); }
+async function scrapeLatest(page = 1) { return paginate(await latestCatalog(), page); }
 async function scrapeSearch(query, page = 1) {
   const params = new URLSearchParams({ s: query });
   if (page > 1) params.set("paged", String(page));
@@ -283,6 +322,18 @@ module.exports = function registerThunder(app, { getCache, setCache, coalescedSc
     } catch (error) { console.error(`[Thunder Pustaka Error] ${error.message}`); res.status(502).json({ success: false, page, total: 0, data: [], message: error.message }); }
   });
 
+  app.get("/thunder/latest", async (req, res) => {
+    const page = parsePage(req.query.page || "1");
+    if (!page) return res.status(400).json({ success: false, message: "Page tidak valid" });
+    const key = `thunder:latest:${page}`, cached = getCache(key);
+    if (cached) return res.json(cached);
+    try {
+      const result = await coalescedScrape(key, () => scrapeLatest(page));
+      const response = { success: true, source: "en-thunderscans.com", order: "latest", page, total: result.data.length, meta: result.meta, data: rewriteImages(result.data, req) };
+      setCache(key, response, 120); res.json(response);
+    } catch (error) { console.error(`[Thunder Latest Error] ${error.message}`); res.status(502).json({ success: false, page, total: 0, data: [], message: error.message }); }
+  });
+
   app.get("/thunder/search", async (req, res) => {
     const query = clean(req.query.q), page = parsePage(req.query.page || "1");
     if (!query) return res.status(400).json({ success: false, message: "Masukkan parameter ?q=" });
@@ -311,7 +362,7 @@ module.exports = function registerThunder(app, { getCache, setCache, coalescedSc
     catch (error) { console.error(`[Thunder Chapter Error] ${seriesSlug}/${chapterSlug}: ${error.message}`); res.status(error.status === 404 ? 404 : 502).json({ success: false, message: error.message }); }
   });
 
-  console.log("Thunder routes registered: /thunder/pustaka, /thunder/search, /thunder/detail/:slug, /thunder/chapter/:seriesSlug/:chapterSlug, /thunder/image");
+  console.log("Thunder routes registered: /thunder/pustaka, /thunder/latest, /thunder/search, /thunder/detail/:slug, /thunder/chapter/:seriesSlug/:chapterSlug, /thunder/image");
 };
 
-module.exports._test = { parseCards, parseDetail, parseChapter, parsePage, normalizeImage, scrapePustaka, scrapeSearch, scrapeDetail, scrapeChapter };
+module.exports._test = { parseCards, parseDetail, parseChapter, parsePage, normalizeImage, rssBySlug, isoDate, scrapePustaka, scrapeLatest, scrapeSearch, scrapeDetail, scrapeChapter };
