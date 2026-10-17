@@ -8,8 +8,10 @@
  * Status riset 5 sistem player otakudesu:
  *   filedon  -> ✅ BEKERJA. Laravel + Inertia; props.url = presigned R2 (mp4 murni),
  *               dan vast_url = null (iklan terpisah di ad_slots) => video bersih.
- *   vidhide  -> ❌ packed JS bisa di-decode, tapi CDN balas 0 byte / 403
- *               (token + IP bound). Sudah dicoba semua kombinasi header: gagal.
+ *   vidhide  -> ✅ BEKERJA. Kode player di-pack (Dean Edwards packer +
+ *               obfuscator.io), tapi objek `links` di dalamnya memuat URL HLS
+ *               utuh lengkap dengan token. Buka packer, ambil URL-nya.
+ *               Memakai HLS (butuh hls.js); CORS CDN `*`.
  *   mega     -> ✅ BEKERJA (megajs). Link embed /file/ + key fragment; API
  *               {a:"g",g:1,ssl:2,p:<downloadId>} membalas URL gateway (ciphertext
  *               AES-128-CTR). Dekripsi dilakukan megajs (library resmi MEGA),
@@ -170,6 +172,138 @@ async function resolveMega(embedUrl) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// VIDHIDE
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Player vidhide memakai HLS (bukan MP4). URL stream-nya TIDAK terlihat di HTML
+ * mentah karena kodenya di-pack dua lapis:
+ *   1. Dean Edwards packer : eval(function(p,a,c,k,e,d){...}('...',a,c,'kata|kata'))
+ *   2. obfuscator.io (_0x...) — berisi logika iklan, tidak perlu kita buka.
+ *
+ * Yang kita butuh ada di lapis 1: objek `links` berisi URL HLS utuh lengkap
+ * dengan token, misal:
+ *   links.hls2 = "https://xxxx.acek-cdn.com/hls2/..../master.m3u8?t=...&e=129600&..."
+ *
+ * Packer cuma "mengganti" identifier dengan kamus kata; membuka packer cukup
+ * dengan MENGAMBIL argumen pertama pemanggilan eval (tanpa mengeksekusinya),
+ * jadi tidak perlu mesin JS penuh — cukup vm dengan eval yang menangkap.
+ *
+ * Catatan lama "CDN vidhide memblokir IP server (403)" TIDAK berlaku lagi:
+ * master.m3u8, playlist anak, dan segmen .ts semuanya 200/206 dari VPS,
+ * lengkap dengan header CORS `Access-Control-Allow-Origin: *`.
+ */
+const vm = require("vm");
+
+/** Buka kode packer tanpa mengeksekusi hasilnya: kembalikan kode bersih. */
+function unpackPackedScript(packedCode) {
+  const captured = [];
+  const ctx = {
+    console: { log() {}, warn() {}, error() {} },
+    // eval penangkap: fungsi packer memanggil eval(argumen) dengan kode hasil
+    // buka packer; kita simpan lalu berhenti (tidak dieksekusi = aman).
+    eval(src) {
+      captured.push(String(src));
+      return undefined;
+    },
+  };
+  vm.createContext(ctx);
+  try {
+    vm.runInContext(packedCode, ctx, { timeout: 2000 });
+  } catch (_) {
+    // sebagian packer memakai pola lain — abaikan, lanjut ke fallback regex
+  }
+  return captured.join("\n");
+}
+
+/** Cari SEMUA kandidat URL HLS (links.hls2/hls3/hls4) di halaman embed vidhide.
+ *  Halaman embed kadang menyajikan beberapa mirror; tidak semuanya valid
+ *  (ada host yang balas 404), jadi kumpulkan dulu semuanya untuk diverifikasi. */
+function collectVidhideHls(html) {
+  const page = String(html || "");
+  const scripts = page.match(/<script[^>]*>([\s\S]*?)<\/script>/gi) || [];
+  const haystacks = [];
+  for (const s of scripts) {
+    // hanya buka script yang berisi packer; sisanya tidak relevan.
+    // Ambil ISI tag-nya saja (tanpa <script>...</script>) supaya valid sebagai JS.
+    if (!/eval\(function\(p,a,c,k,e,d\)/.test(s)) continue;
+    const code = s.replace(/^<script[^>]*>/i, "").replace(/<\/script>$/i, "");
+    const unpacked = unpackPackedScript(code);
+    if (unpacked) haystacks.push(unpacked);
+  }
+  const found = {};
+  for (const h of haystacks) {
+    const re = /["'](hls\d)["']\s*:\s*["'](https?:[^"']+)["']/g;
+    let m;
+    while ((m = re.exec(h))) {
+      if (!found[m[1]]) found[m[1]] = m[2].replace(/&amp;/g, "&");
+    }
+  }
+  // kualitas tertinggi dulu (hls4 > hls3 > hls2)
+  const out = [];
+  for (const key of ["hls4", "hls3", "hls2"]) if (found[key]) out.push(found[key]);
+  // fallback: kalau pola berubah, cari apa pun yang mirip URL HLS acek-cdn
+  if (!out.length) {
+    for (const h of haystacks.concat([page])) {
+      const m = /https?:\/\/[^\s"'<>]+\.acek-cdn\.com\/hls2\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i.exec(h);
+      if (m) { out.push(m[0].replace(/&amp;/g, "&")); break; }
+    }
+  }
+  return [...new Set(out)];
+}
+
+/** Pastikan URL benar-benar playlist HLS yang hidup (bukan host mati 404).
+ *  Cukup ambil 200 byte pertama; master.m3u8 selalu diawali #EXTM3U. */
+async function isLiveHls(url) {
+  try {
+    const res = await fetch(url, { headers: { Range: "bytes=0-200" }, signal: AbortSignal.timeout(12000) });
+    if (res.status !== 200 && res.status !== 206) return false;
+    const head = (await res.text()).slice(0, 20);
+    return head.startsWith("#EXTM3U");
+  } catch (_) {
+    return false;
+  }
+}
+
+async function resolveVidhide(embedUrl) {
+  const attempts = 2; // halaman embed kadang mengembalikan mirror mati
+  let lastFail = "Tidak ada URL HLS";
+  for (let i = 0; i < attempts; i++) {
+    let html;
+    try {
+      const res = await axios.get(embedUrl, {
+        timeout: 20000,
+        headers: {
+          "User-Agent": UA,
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          Referer: "https://otakudesu.blog/",
+        },
+      });
+      html = res.data;
+    } catch (err) {
+      lastFail = String((err && err.message) || err);
+      continue;
+    }
+    const candidates = collectVidhideHls(html);
+    if (!candidates.length) { lastFail = "URL HLS tidak ditemukan (pemaketan kode berubah?)"; continue; }
+    // verifikasi satu per satu; halaman embed memutar mirror dan sebagian 404
+    for (const url of candidates) {
+      if (await isLiveHls(url)) {
+        return {
+          success: true,
+          provider: "vidhide",
+          url,
+          // HLS butuh hls.js di frontend (CORS CDN-nya `*`, jadi boleh langsung).
+          mimeType: "application/x-mpegURL",
+          isHls: true,
+        };
+      }
+    }
+    lastFail = `Semua kandidat (${candidates.length}) tidak hidup (404/tidak terjangkau)`;
+  }
+  return { success: false, provider: "vidhide", message: lastFail };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DESUSTREAM (odcdn / odstream / ondesu2hd)
 // ─────────────────────────────────────────────────────────────────────────────
 /**
@@ -254,13 +388,7 @@ async function resolveStream(embedUrl) {
     case "filedon":
       return await resolveFiledon(embedUrl);
     case "vidhide":
-      return {
-        success: false,
-        provider,
-        message:
-          "CDN vidhide menolak request server (0 byte/403, token+IP bound). " +
-          "Packed JS bisa di-decode tapi stream tidak bisa diambil.",
-      };
+      return await resolveVidhide(embedUrl);
     case "mega":
       return await resolveMega(embedUrl);
     case "odcdn":
@@ -292,6 +420,9 @@ module.exports = {
   resolveStream,
   resolveFiledon,
   resolveMega,
+  resolveVidhide,
+  resolveDesustream,
+  collectVidhideHls,
   decodeMegaToken,
   parseInertiaDataPage,
 };
@@ -514,13 +645,12 @@ module.exports.registerRoutes = function registerRoutes(app, deps = {}) {
     res.json({
       success: true,
       data: {
-        supported: ["filedon", "mega"],
+        supported: ["filedon", "mega", "vidhide", "odcdn", "odstream", "ondesu2hd"],
         cleanIframe: {
           blogs: "Player Blogger praktis tanpa iklan — diputar langsung, ditandai Ryukomik",
         },
         unsupported: {
-          vidhide: "CDN menolak request server (0 byte/403)",
-          odstream: "Butuh kode enkripsi dari AJAX",
+          otakuwatch7: "Belum diteliti",
         },
       },
     });
