@@ -16,7 +16,10 @@
  *               stream lewat /stream/mega/<token> dengan dukungan Range.
  *   blogs    -> ⚠️ TIDAK di-resolve: player Blogger praktis TANPA IKLAN, jadi
  *               iframe-nya dipakai langsung dan ditandai "ryu-lokal" di frontend.
- *   odstream -> ⚠️ playerjs; `file` masih placeholder, butuh kode enkripsi dari AJAX.
+ *   desustream (odcdn/odstream/ondesu2hd) -> ✅ BEKERJA. Halaman player sudah
+ *               memuat URL MP4 mentah (cdn.odcloud.net / archive.org /
+ *               googlevideo). Tidak ada enkripsi; cukup cabut URL-nya. Diputar
+ *               lewat /stream/proxy (butuh proxy karena CDN tanpa header CORS).
  * =====================================================
  */
 
@@ -167,6 +170,60 @@ async function resolveMega(embedUrl) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// DESUSTREAM (odcdn / odstream / ondesu2hd)
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Player desustream (odcdn, odstream, ondesu2hd, ...) menyajikan halaman HTML
+ * yang di dalamnya sudah tertulis URL video MP4 MENTAH — tanpa enkripsi/token.
+ * Bentuknya:
+ *   odcdn      -> const videoURL = "https://cdn.odcloud.net/anime/....mp4";
+ *   odstream   -> {id:"playerjs", file:"https://archive.org/download/.../x.mp4"}
+ *   ondesu2hd  -> <source src="https://rr4---sn-....googlevideo.com/videoplayback?...">
+ *
+ * Jadi cukup ambil halaman lalu cabut URL-nya dengan pola. Tidak perlu
+ * dekripsi; pemutaran memakai proxy /stream/proxy supaya tidak kena CORS.
+ */
+function extractDesuVideoUrl(html) {
+  const text = String(html || "");
+  const patterns = [
+    /const\s+videoURL\s*=\s*["']([^"']+)["']/i,
+    /file\s*:\s*["'](https?:\/\/[^"']+)["']/i,
+    /<source[^>]+src=["']([^"']+)["']/i,
+    /["'](https?:\/\/[^"']+\.(?:mp4|m3u8)[^"']*)["']/i,
+  ];
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m && m[1]) return m[1].replace(/&amp;/g, "&").trim();
+  }
+  return null;
+}
+
+async function resolveDesustream(embedUrl, provider) {
+  try {
+    const res = await axios.get(embedUrl, {
+      timeout: 20000,
+      headers: {
+        "User-Agent": UA,
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        Referer: embedUrl,
+      },
+    });
+    const videoUrl = extractDesuVideoUrl(res.data);
+    if (!videoUrl) {
+      return { success: false, provider, message: "URL video tidak ditemukan di halaman player" };
+    }
+    return {
+      success: true,
+      provider,
+      url: videoUrl,
+      mimeType: /\.m3u8(\?|$)/i.test(videoUrl) ? "application/x-mpegURL" : "video/mp4",
+    };
+  } catch (err) {
+    return { success: false, provider, message: String((err && err.message) || err) };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Deteksi penyedia dari URL embed
 // ─────────────────────────────────────────────────────────────────────────────
 function detectProvider(embedUrl) {
@@ -175,7 +232,12 @@ function detectProvider(embedUrl) {
   if (u.includes("vidhide")) return "vidhide";
   if (u.includes("mega.nz")) return "mega";
   if (u.includes("blogger.com") || u.includes("blogspot")) return "blogs";
-  if (u.includes("desustream") || u.includes("odstream")) return "odstream";
+  // desustream: satu host, banyak varian player. Semuanya menyajikan MP4 mentah.
+  if (u.includes("desustream") || u.includes("odcloud")) {
+    if (u.includes("/odcdn")) return "odcdn";
+    if (u.includes("ondesu")) return "ondesu2hd";
+    return "odstream";
+  }
   return null;
 }
 
@@ -201,6 +263,10 @@ async function resolveStream(embedUrl) {
       };
     case "mega":
       return await resolveMega(embedUrl);
+    case "odcdn":
+    case "odstream":
+    case "ondesu2hd":
+      return await resolveDesustream(embedUrl, provider);
     case "blogs":
       return {
         success: false,
