@@ -264,7 +264,7 @@ async function isLiveHls(url) {
   }
 }
 
-async function resolveVidhide(embedUrl) {
+async function resolveVidhide(embedUrl, userAgent) {
   const attempts = 2; // halaman embed kadang mengembalikan mirror mati
   let lastFail = "Tidak ada URL HLS";
   for (let i = 0; i < attempts; i++) {
@@ -273,7 +273,7 @@ async function resolveVidhide(embedUrl) {
       const res = await axios.get(embedUrl, {
         timeout: 20000,
         headers: {
-          "User-Agent": UA,
+          "User-Agent": pickUserAgent(userAgent),
           Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
           Referer: "https://otakudesu.blog/",
         },
@@ -304,19 +304,31 @@ async function resolveVidhide(embedUrl) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DESUSTREAM (odcdn / odstream / ondesu2hd)
+// DESUSTREAM (odcdn / odstream / ondesu2hd / otakuwatch7)
 // ─────────────────────────────────────────────────────────────────────────────
 /**
- * Player desustream (odcdn, odstream, ondesu2hd, ...) menyajikan halaman HTML
- * yang di dalamnya sudah tertulis URL video MP4 MENTAH — tanpa enkripsi/token.
+ * Player desustream (odcdn, odstream, ondesu2hd, otakuwatch7, ...) menyajikan
+ * halaman HTML yang di dalamnya sudah tertulis URL video MENTAH.
  * Bentuknya:
- *   odcdn      -> const videoURL = "https://cdn.odcloud.net/anime/....mp4";
- *   odstream   -> {id:"playerjs", file:"https://archive.org/download/.../x.mp4"}
- *   ondesu2hd  -> <source src="https://rr4---sn-....googlevideo.com/videoplayback?...">
+ *   odcdn        -> const videoURL = "https://cdn.odcloud.net/anime/....mp4";
+ *   odstream     -> {id:"playerjs", file:"https://archive.org/download/.../x.mp4"}
+ *   ondesu2hd    -> <source src="https://rr4---sn-....googlevideo.com/...">
+ *   otakuwatch7  -> <source src="https://rr2---sn-....googlevideo.com/...">
  *
- * Jadi cukup ambil halaman lalu cabut URL-nya dengan pola. Tidak perlu
- * dekripsi; pemutaran memakai proxy /stream/proxy supaya tidak kena CORS.
+ * ⚠️ Untuk yang googlevideo (ondesu2hd/otakuwatch7) URL-nya DIKUNCI KE
+ * USER-AGENT: halaman harus di-fetch dengan UA yang sama dengan yang nanti
+ * memutar video, atau token `eaua` tidak cocok dan googlevideo membalas
+ * error 4 (MEDIA_ERR_SRC_NOT_SUPPORTED). Terbukti dengan uji langsung:
+ *   fetch pakai UA browser  -> eaua=bpwTthqPGjg -> BERHASIL
+ *   fetch pakai UA backend  -> eaua=t0O7PJ_0Fao -> GAGAL
+ * Karena itu UA penonton diteruskan dari route /stream/resolve.
  */
+function pickUserAgent(userAgent) {
+  const ua = String(userAgent || "").trim();
+  // pakai UA pengirim bila masuk akal, selain itu kembali ke UA default
+  if (ua.length >= 20 && /mozilla|chrome|safari|firefox/i.test(ua) && ua.length < 400) return ua;
+  return UA;
+}
 function extractDesuVideoUrl(html) {
   const text = String(html || "");
   const patterns = [
@@ -332,12 +344,12 @@ function extractDesuVideoUrl(html) {
   return null;
 }
 
-async function resolveDesustream(embedUrl, provider) {
+async function resolveDesustream(embedUrl, provider, userAgent) {
   try {
     const res = await axios.get(embedUrl, {
       timeout: 20000,
       headers: {
-        "User-Agent": UA,
+        "User-Agent": pickUserAgent(userAgent),
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         Referer: embedUrl,
       },
@@ -346,11 +358,17 @@ async function resolveDesustream(embedUrl, provider) {
     if (!videoUrl) {
       return { success: false, provider, message: "URL video tidak ditemukan di halaman player" };
     }
+    // googlevideo (ondesu2hd/otakuwatch7) MENOLAK IP datacenter: lewat proxy VPS
+    // selalu 403/error 4 (sudah diuji). Padahal CORS `*` tidak diperlukan —
+    // <video src> tanpa atribut crossOrigin tidak butuh CORS — jadi browser
+    // memutarnya langsung. URL lain (odcloud/archive.org) tetap lewat proxy.
+    const direct = /googlevideo\.com/i.test(videoUrl);
     return {
       success: true,
       provider,
       url: videoUrl,
       mimeType: /\.m3u8(\?|$)/i.test(videoUrl) ? "application/x-mpegURL" : "video/mp4",
+      ...(direct ? { direct: true } : {}),
     };
   } catch (err) {
     return { success: false, provider, message: String((err && err.message) || err) };
@@ -366,10 +384,11 @@ function detectProvider(embedUrl) {
   if (u.includes("vidhide")) return "vidhide";
   if (u.includes("mega.nz")) return "mega";
   if (u.includes("blogger.com") || u.includes("blogspot")) return "blogs";
-  // desustream: satu host, banyak varian player. Semuanya menyajikan MP4 mentah.
+  // desustream: satu host, banyak varian player. Semuanya menyajikan video mentah.
   if (u.includes("desustream") || u.includes("odcloud")) {
     if (u.includes("/odcdn")) return "odcdn";
     if (u.includes("ondesu")) return "ondesu2hd";
+    if (u.includes("otakuwatch")) return "otakuwatch7";
     return "odstream";
   }
   return null;
@@ -378,7 +397,13 @@ function detectProvider(embedUrl) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Resolver terpadu
 // ─────────────────────────────────────────────────────────────────────────────
-async function resolveStream(embedUrl) {
+/**
+ * @param embedUrl URL halaman player.
+ * @param userAgent UA penonton (opsional). WAJIB diteruskan untuk player
+ *        googlevideo (ondesu2hd/otakuwatch7) — lihat catatan di
+ *        `pickUserAgent`: token `eaua` terikat UA.
+ */
+async function resolveStream(embedUrl, userAgent) {
   const provider = detectProvider(embedUrl);
   if (!provider) {
     return { success: false, message: "Penyedia player tidak dikenali", embed: embedUrl };
@@ -388,13 +413,14 @@ async function resolveStream(embedUrl) {
     case "filedon":
       return await resolveFiledon(embedUrl);
     case "vidhide":
-      return await resolveVidhide(embedUrl);
+      return await resolveVidhide(embedUrl, userAgent);
     case "mega":
       return await resolveMega(embedUrl);
     case "odcdn":
     case "odstream":
     case "ondesu2hd":
-      return await resolveDesustream(embedUrl, provider);
+    case "otakuwatch7":
+      return await resolveDesustream(embedUrl, provider, userAgent);
     case "blogs":
       return {
         success: false,
@@ -403,12 +429,6 @@ async function resolveStream(embedUrl) {
         // menandainya "Ryu-lokal" dan memutar iframe apa adanya.
         noAds: true,
         message: "Player Blogger bersih (tanpa iklan) — diputar langsung tanpa resolve.",
-      };
-    case "odstream":
-      return {
-        success: false,
-        provider,
-        message: "odstream/desustream: `file` masih placeholder, butuh kode enkripsi dari AJAX.",
       };
     default:
       return { success: false, provider, message: "Tidak ada resolver untuk penyedia ini" };
@@ -468,12 +488,18 @@ module.exports.registerRoutes = function registerRoutes(app, deps = {}) {
     const url = req.query.url;
     if (!url) return res.status(400).json({ success: false, message: "Parameter 'url' diperlukan" });
 
+    // UA penonton dipakai saat mengambil halaman player. Untuk player
+    // googlevideo (ondesu2hd/otakuwatch7) token `eaua` terikat UA, jadi hasil
+    // berbeda tiap UA — karenanya UA ikut masuk kunci cache.
+    const userAgent = req.get("user-agent");
+    const uaKey = require("crypto").createHash("sha1").update(String(userAgent || "")).digest("hex").slice(0, 8);
+
     const provider = detectProvider(url);
-    const cacheKey = `stream_resolve_${provider}_${url}`;
+    const cacheKey = `stream_resolve_${provider}_${uaKey}_${url}`;
     const cached = getCache(cacheKey);
     if (cached) return res.json(cached);
 
-    const info = await resolveStream(url);
+    const info = await resolveStream(url, userAgent);
     if (!info.success) return res.status(502).json(info);
 
     // Versi proxy: supaya frontend bisa memutar tanpa kena CORS/hotlink.
@@ -645,13 +671,11 @@ module.exports.registerRoutes = function registerRoutes(app, deps = {}) {
     res.json({
       success: true,
       data: {
-        supported: ["filedon", "mega", "vidhide", "odcdn", "odstream", "ondesu2hd"],
+        supported: ["filedon", "mega", "vidhide", "odcdn", "odstream", "ondesu2hd", "otakuwatch7"],
         cleanIframe: {
           blogs: "Player Blogger praktis tanpa iklan — diputar langsung, ditandai Ryukomik",
         },
-        unsupported: {
-          otakuwatch7: "Belum diteliti",
-        },
+        unsupported: {},
       },
     });
   });
