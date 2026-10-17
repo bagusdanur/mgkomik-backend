@@ -252,16 +252,66 @@ function collectVidhideHls(html) {
 }
 
 /** Pastikan URL benar-benar playlist HLS yang hidup (bukan host mati 404).
- *  Cukup ambil 200 byte pertama; master.m3u8 selalu diawali #EXTM3U. */
+ *  Cukup ambil 200 byte pertama; master.m3u8 selalu diawali #EXTM3U.
+ *  Timeout 6 dtk (dari 12) supaya mirror yang mati tidak mengulur waktu. */
 async function isLiveHls(url) {
   try {
-    const res = await fetch(url, { headers: { Range: "bytes=0-200" }, signal: AbortSignal.timeout(12000) });
+    const res = await fetch(url, { headers: { Range: "bytes=0-200" }, signal: AbortSignal.timeout(6000) });
     if (res.status !== 200 && res.status !== 206) return false;
     const head = (await res.text()).slice(0, 20);
     return head.startsWith("#EXTM3U");
   } catch (_) {
     return false;
   }
+}
+
+/** Verifikasi SEMUA kandidat secara PARALEL dan berhenti begitu ada yang hidup.
+ *  Sebelumnya berurutan — satu mirror mati bisa menambah 6–12 dtk, dan itu
+ *  terasa sebagai "video lama banget belum muncul". */
+function firstLiveHls(urls) {
+  return new Promise((resolve) => {
+    let pending = urls.length;
+    let done = false;
+    if (!pending) return resolve(null);
+    for (const u of urls) {
+      isLiveHls(u).then((ok) => {
+        if (ok && !done) { done = true; noteLiveHost(u); resolve(u); return; }
+        if (--pending === 0 && !done) resolve(null);
+      });
+    }
+  });
+}
+
+// ── Memo "host ini baru saja terbukti hidup" ─────────────────────────────────
+// Mirror vidhide berganti-ganti tapi host-nya berulang (acek-cdn, dramiyos, ...).
+// Verifikasi butuh ~0,85 dtk — buang waktu itu kalau host yang sama baru saja
+// menjawab 200. Umur pendek (3 menit) supaya kalau host tiba-tiba mati ia
+// cepat terbuang; dan `resolveVidhide` tetap punya percobaan ulang sebagai
+// jaring pengaman.
+const LIVE_HOST_TTL = 3 * 60 * 1000;
+const liveHosts = new Map(); // host -> waktu terakhir terbukti hidup
+
+function hostOf(url) {
+  try { return new URL(url).host; } catch (_) { return ""; }
+}
+function noteLiveHost(url) {
+  const h = hostOf(url);
+  if (h) liveHosts.set(h, Date.now());
+  if (liveHosts.size > 200) {
+    const cut = Date.now() - LIVE_HOST_TTL;
+    for (const [k, v] of liveHosts) if (v < cut) liveHosts.delete(k);
+  }
+}
+function hostIsLive(url) {
+  const seen = liveHosts.get(hostOf(url));
+  return Boolean(seen && Date.now() - seen < LIVE_HOST_TTL);
+}
+
+/** Pilih kandidat: bila ada host yang baru saja terbukti hidup, pakai langsung
+ *  tanpa verifikasi (hemat ~0,85 dtk); selain itu verifikasi paralel. */
+async function pickLiveHls(urls) {
+  for (const u of urls) if (hostIsLive(u)) { noteLiveHost(u); return u; }
+  return await firstLiveHls(urls);
 }
 
 async function resolveVidhide(embedUrl, userAgent) {
@@ -285,18 +335,18 @@ async function resolveVidhide(embedUrl, userAgent) {
     }
     const candidates = collectVidhideHls(html);
     if (!candidates.length) { lastFail = "URL HLS tidak ditemukan (pemaketan kode berubah?)"; continue; }
-    // verifikasi satu per satu; halaman embed memutar mirror dan sebagian 404
-    for (const url of candidates) {
-      if (await isLiveHls(url)) {
-        return {
-          success: true,
-          provider: "vidhide",
-          url,
-          // HLS butuh hls.js di frontend (CORS CDN-nya `*`, jadi boleh langsung).
-          mimeType: "application/x-mpegURL",
-          isHls: true,
-        };
-      }
+    // verifikasi PARALEL (atau langsung lewat kalau host-nya baru saja terbukti
+    // hidup); halaman embed memutar mirror dan sebagian 404
+    const live = await pickLiveHls(candidates);
+    if (live) {
+      return {
+        success: true,
+        provider: "vidhide",
+        url: live,
+        // HLS butuh hls.js di frontend (CORS CDN-nya `*`, jadi boleh langsung).
+        mimeType: "application/x-mpegURL",
+        isHls: true,
+      };
     }
     lastFail = `Semua kandidat (${candidates.length}) tidak hidup (404/tidak terjangkau)`;
   }
@@ -488,14 +538,17 @@ module.exports.registerRoutes = function registerRoutes(app, deps = {}) {
     const url = req.query.url;
     if (!url) return res.status(400).json({ success: false, message: "Parameter 'url' diperlukan" });
 
-    // UA penonton dipakai saat mengambil halaman player. Untuk player
-    // googlevideo (ondesu2hd/otakuwatch7) token `eaua` terikat UA, jadi hasil
-    // berbeda tiap UA — karenanya UA ikut masuk kunci cache.
+    // UA penonton dipakai saat mengambil halaman player. HANYA player
+    // googlevideo (ondesu2hd/otakuwatch7) yang token-nya terikat UA (lihat
+    // `pickUserAgent`) — makanya UA ikut masuk kunci cache HANYA untuk mereka.
+    // Untuk provider lain (vidhide, odcloud, ...) hasilnya sama untuk semua UA,
+    // jadi kunci tanpa UA supaya cache-nya jalan untuk semua pengunjung.
     const userAgent = req.get("user-agent");
-    const uaKey = require("crypto").createHash("sha1").update(String(userAgent || "")).digest("hex").slice(0, 8);
-
     const provider = detectProvider(url);
-    const cacheKey = `stream_resolve_${provider}_${uaKey}_${url}`;
+    const uaSensitive = provider === "ondesu2hd" || provider === "otakuwatch7";
+    const cacheKey = uaSensitive
+      ? `stream_resolve_${provider}_${require("crypto").createHash("sha1").update(String(userAgent || "")).digest("hex").slice(0, 8)}_${url}`
+      : `stream_resolve_${provider}_${url}`;
     const cached = getCache(cacheKey);
     if (cached) return res.json(cached);
 
@@ -513,7 +566,11 @@ module.exports.registerRoutes = function registerRoutes(app, deps = {}) {
       info.url_proxy = `${base}/stream/proxy/${Buffer.from(info.url).toString("base64url")}`;
     }
 
-    setCache(cacheKey, info, 60 * 30); // 30 menit (presigned R2 biasanya 1 jam)
+    // Vidhide: token HLS-nya berumur 36 jam (`e=129600`), jadi hasil resolve
+    // boleh dipakai lebih lama — 2 jam, supaya buka ulang/tukar server tidak
+    // membeli ulang resolve 2 dtk. Provider lain tetap 30 menit.
+    const ttlSeconds = provider === "vidhide" ? 60 * 120 : 60 * 30;
+    setCache(cacheKey, info, ttlSeconds);
     res.json(info);
   });
 
