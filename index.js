@@ -153,6 +153,135 @@ let imageCacheSize = 0;
 const IMAGE_CACHE_MAX_BYTES = Number(process.env.IMAGE_CACHE_MAX_BYTES || 32 * 1024 * 1024); // 32MB
 const IMAGE_CACHE_TTL = 45 * 60 * 1000; // 45 menit (dulu 7 hari)
 
+// ==========================================
+// 💾 IMAGE DISK CACHE (L2) — bertahan restart
+// RAM dibersihkan tiap restart PM2 → salinan di disk
+// dipakai ulang supaya tidak ada gelombang ambil ulang.
+// ==========================================
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const IMAGE_DISK_CACHE_DIR =
+  process.env.IMAGE_DISK_CACHE_DIR || path.join(__dirname, "image-cache");
+const IMAGE_DISK_CACHE_MAX_BYTES =
+  Number(process.env.IMAGE_DISK_CACHE_MAX_MB || 512) * 1024 * 1024;
+const IMAGE_DISK_CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 hari (tetap < TTL edge CF)
+
+let diskCacheReady = false;
+try {
+  fs.mkdirSync(IMAGE_DISK_CACHE_DIR, { recursive: true });
+  diskCacheReady = true;
+} catch {
+  diskCacheReady = false;
+}
+
+function diskCacheFileFor(url) {
+  const hash = crypto.createHash("sha1").update(url).digest("hex");
+  return path.join(IMAGE_DISK_CACHE_DIR, `${hash}.img`);
+}
+
+// Format file: [4 byte panjang meta][meta JSON][bytes gambar]
+function readDiskImageCache(url) {
+  if (!diskCacheReady) return null;
+  try {
+    const file = diskCacheFileFor(url);
+    const data = fs.readFileSync(file);
+    if (data.length < 8) return null;
+    const metaLen = data.readUInt32BE(0);
+    if (metaLen <= 0 || metaLen > 4096 || 4 + metaLen >= data.length) return null;
+    const meta = JSON.parse(data.toString("utf8", 4, 4 + metaLen));
+    const age = Date.now() - (meta.ts || 0);
+    if (age > IMAGE_DISK_CACHE_TTL || age < 0) {
+      fs.promises.unlink(file).catch(() => {});
+      return null;
+    }
+    const buffer = data.subarray(4 + metaLen);
+    if (buffer.length < 512) return null;
+    return { buffer, contentType: meta.contentType || "image/jpeg" };
+  } catch {
+    return null;
+  }
+}
+
+function writeDiskImageCache(url, buffer, contentType) {
+  if (!diskCacheReady || !Buffer.isBuffer(buffer)) return;
+  try {
+    const file = diskCacheFileFor(url);
+    const meta = Buffer.from(
+      JSON.stringify({
+        ts: Date.now(),
+        contentType: contentType || "image/jpeg",
+        size: buffer.length,
+      }),
+      "utf8"
+    );
+    const head = Buffer.alloc(4);
+    head.writeUInt32BE(meta.length, 0);
+    const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+    fs.writeFile(tmp, Buffer.concat([head, meta, buffer]), (err) => {
+      if (err) {
+        fs.promises.unlink(tmp).catch(() => {});
+        return;
+      }
+      fs.rename(tmp, file, (err2) => {
+        if (err2) fs.promises.unlink(tmp).catch(() => {});
+        else scheduleDiskCachePrune();
+      });
+    });
+  } catch {
+    /* cache saja, gagal tidak fatal */
+  }
+}
+
+// Buang file kedaluwarsa / lama kalau melewati kuota disk (maks 10 menit sekali)
+let lastDiskCachePrune = 0;
+function scheduleDiskCachePrune() {
+  const now = Date.now();
+  if (now - lastDiskCachePrune < 10 * 60 * 1000) return;
+  lastDiskCachePrune = now;
+  setImmediate(async () => {
+    try {
+      const names = await fs.promises.readdir(IMAGE_DISK_CACHE_DIR);
+      const entries = [];
+      let total = 0;
+      for (const name of names) {
+        if (!name.endsWith(".img")) continue;
+        const file = path.join(IMAGE_DISK_CACHE_DIR, name);
+        try {
+          const st = await fs.promises.stat(file);
+          if (st.size < 600) {
+            await fs.promises.unlink(file);
+            continue;
+          }
+          entries.push({ file, mtime: st.mtimeMs, size: st.size });
+          total += st.size;
+        } catch {
+          /* file hilang di tengah jalan */
+        }
+      }
+      const cutoff = Date.now() - IMAGE_DISK_CACHE_TTL;
+      for (const e of entries) {
+        if (e.mtime <= cutoff) {
+          await fs.promises.unlink(e.file).catch(() => {});
+          total -= e.size;
+          e.size = 0;
+        }
+      }
+      if (total > IMAGE_DISK_CACHE_MAX_BYTES) {
+        entries.sort((a, b) => a.mtime - b.mtime);
+        for (const e of entries) {
+          if (total <= IMAGE_DISK_CACHE_MAX_BYTES) break;
+          if (!e.size) continue;
+          await fs.promises.unlink(e.file).catch(() => {});
+          total -= e.size;
+        }
+      }
+    } catch {
+      /* prune terbaik saja */
+    }
+  });
+}
+
 function estimateBufferSize(buf) {
   if (!buf || !Buffer.isBuffer(buf)) return 0;
   return buf.byteLength + 200;
@@ -177,14 +306,30 @@ function evictImageCache(neededBytes = 0) {
 function getImageCache(url) {
   if (!url) return null;
   const item = imageCache.get(url);
-  if (!item) return null;
-  if (Date.now() - item.ts > IMAGE_CACHE_TTL) {
-    imageCacheSize -= item.size;
-    imageCache.delete(url);
-    return null;
+  if (item) {
+    if (Date.now() - item.ts > IMAGE_CACHE_TTL) {
+      imageCacheSize -= item.size;
+      imageCache.delete(url);
+    } else {
+      item.ts = Date.now();
+      return { buffer: item.buffer, contentType: item.contentType };
+    }
   }
-  item.ts = Date.now();
-  return { buffer: item.buffer, contentType: item.contentType };
+  // L2: disk — inilah yang bikin cache bertahan saat proses di-restart
+  const disk = readDiskImageCache(url);
+  if (!disk) return null;
+  const size = estimateBufferSize(disk.buffer);
+  if (size <= IMAGE_CACHE_MAX_BYTES) {
+    evictImageCache(size);
+    imageCacheSize += size;
+    imageCache.set(url, {
+      buffer: disk.buffer,
+      contentType: disk.contentType,
+      ts: Date.now(),
+      size,
+    });
+  }
+  return { buffer: disk.buffer, contentType: disk.contentType };
 }
 
 function setImageCache(url, buffer, contentType) {
@@ -199,6 +344,7 @@ function setImageCache(url, buffer, contentType) {
   evictImageCache(size);
   imageCacheSize += size;
   imageCache.set(url, { buffer, contentType: contentType || 'image/jpeg', ts: Date.now(), size });
+  writeDiskImageCache(url, buffer, contentType || 'image/jpeg');
 }
 
 setInterval(() => {
