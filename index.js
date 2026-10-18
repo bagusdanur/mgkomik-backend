@@ -15,6 +15,14 @@ app.use(
   }),
 );
 
+// Logging verbose (Cache Hit / success scrape) dibungkus supaya tidak membanjiri
+// stdout+disk. Di produksi, log rame ini memakan CPU & I/O secara signifikan.
+// Set VERBOSE_SCRAPE_LOG=1 untuk mengaktifkan kembali.
+const VERBOSE_SCRAPE_LOG = process.env.VERBOSE_SCRAPE_LOG === "1";
+function vlog(...args) {
+  if (VERBOSE_SCRAPE_LOG) console.log(...args);
+}
+
 // ==========================================
 // 🛠️ OPTIMIZATION UTILITIES: CACHING & AGENT
 // ==========================================
@@ -39,30 +47,91 @@ axios.defaults.httpsAgent = keepAliveAgentHttps;
 axios.defaults.timeout = 15000; // Timeout default 15 detik untuk menghindari request gantung
 
 // Map cache dalam memori
+// LRU cache berbatas BYTES (bukan jumlah item). Map mempertahankan urutan
+// insertion, jadi delete+set = MRU dan keys().next() = LRU sebenarnya.
 const globalMemoryCache = new Map();
+const CACHE_MAX_BYTES = Number(process.env.CACHE_MAX_BYTES || 64 * 1024 * 1024); // 64MB
+const CACHE_MAX_ITEMS = Number(process.env.CACHE_MAX_ITEMS || 800);
+let cacheBytes = 0;
 
-// Helper untuk membaca cache
+// Perkiraan ukuran entry. PENTING: JANGAN JSON.stringify objek besar —
+// itu membuat string sementara sebesar payload di OFF-HEAP (RssAnon) dan
+// itulah penyebab utama RSS membengkak jauh di atas heap V8.
+// Strategi: hitung rekursif murah; batasi kedalaman & jumlah property.
+function estimateCacheSize(data, depth = 0, seen = null) {
+  if (data == null) return 0;
+  if (Buffer.isBuffer(data)) return data.length + 64;
+  if (typeof data === 'string') return data.length * 2 + 64;
+  if (typeof data === 'number') return 8;
+  if (typeof data === 'boolean') return 4;
+  if (typeof data === 'function') return 32;
+  if (depth > 6) return 256; // jangan turun terlalu dalam
+
+  // Guard terhadap struktur siklik
+  if (seen === null) seen = new WeakSet();
+  if (typeof data === 'object') {
+    if (seen.has(data)) return 0;
+    seen.add(data);
+  }
+
+  if (Array.isArray(data)) {
+    // Count actual contents: large arrays can contain kilobytes per entry.
+    // A fixed 64-byte estimate substantially undercounts retained strings.
+    let total = 64;
+    for (let i = 0; i < data.length; i++) {
+      total += estimateCacheSize(data[i], depth + 1, seen);
+    }
+    return total;
+  }
+
+  let total = 64;
+  let keys = 0;
+  for (const k in data) {
+    if (!Object.prototype.hasOwnProperty.call(data, k)) continue;
+    if (++keys > 2000) break; // batasi properti
+    total += (k.length * 2 + 32) + estimateCacheSize(data[k], depth + 1, seen);
+  }
+  return total;
+}
+
+function deleteCacheKey(key) {
+  const item = globalMemoryCache.get(key);
+  if (item) {
+    cacheBytes -= item.size || 0;
+    globalMemoryCache.delete(key);
+  }
+}
+
+// Helper untuk membaca cache (tidak mengubah urutan agar tidak jadi MRU palsu;
+// promosi MRU dilakukan saat set berikutnya)
 function getCache(key) {
   const item = globalMemoryCache.get(key);
   if (!item) return null;
   if (Date.now() > item.expiry) {
-    globalMemoryCache.delete(key);
+    deleteCacheKey(key);
     return null;
   }
   return item.data;
 }
 
-// Helper untuk menyimpan cache
+// Helper untuk menyimpan cache dengan eviksi LRU berbatas bytes + item
 function setCache(key, data, ttlInSeconds) {
+  deleteCacheKey(key); // buang entry lama supaya urutan jadi MRU
+  const size = estimateCacheSize(data);
   globalMemoryCache.set(key, {
     data,
     expiry: Date.now() + ttlInSeconds * 1000,
+    size,
   });
+  cacheBytes += size;
 
-  // Mencegah memory leak dengan membatasi ukuran cache memori maksimal 500 item
-  if (globalMemoryCache.size > 500) {
+  // Eviksi dari yang paling lama tidak dipakai sampai muat
+  while (
+    (cacheBytes > CACHE_MAX_BYTES || globalMemoryCache.size > CACHE_MAX_ITEMS) &&
+    globalMemoryCache.size > 0
+  ) {
     const oldestKey = globalMemoryCache.keys().next().value;
-    globalMemoryCache.delete(oldestKey);
+    deleteCacheKey(oldestKey);
   }
 }
 
@@ -71,7 +140,7 @@ setInterval(() => {
   const now = Date.now();
   for (const [key, item] of globalMemoryCache.entries()) {
     if (now > item.expiry) {
-      globalMemoryCache.delete(key);
+      deleteCacheKey(key);
     }
   }
 }, 5 * 60 * 1000).unref();
@@ -81,8 +150,8 @@ setInterval(() => {
 // ==========================================
 const imageCache = new Map();
 let imageCacheSize = 0;
-const IMAGE_CACHE_MAX_BYTES = 50 * 1024 * 1024;
-const IMAGE_CACHE_TTL = 7 * 24 * 60 * 60 * 1000;
+const IMAGE_CACHE_MAX_BYTES = Number(process.env.IMAGE_CACHE_MAX_BYTES || 32 * 1024 * 1024); // 32MB
+const IMAGE_CACHE_TTL = 45 * 60 * 1000; // 45 menit (dulu 7 hari)
 
 function estimateBufferSize(buf) {
   if (!buf || !Buffer.isBuffer(buf)) return 0;
@@ -122,6 +191,11 @@ function setImageCache(url, buffer, contentType) {
   if (!url || !Buffer.isBuffer(buffer) || buffer.length < 512) return;
   const size = estimateBufferSize(buffer);
   if (size > 5 * 1024 * 1024) return;
+  const previous = imageCache.get(url);
+  if (previous) {
+    imageCacheSize -= previous.size;
+    imageCache.delete(url);
+  }
   evictImageCache(size);
   imageCacheSize += size;
   imageCache.set(url, { buffer, contentType: contentType || 'image/jpeg', ts: Date.now(), size });
@@ -142,7 +216,7 @@ const activeScrapes = new Map();
 
 async function coalescedScrape(urlKey, scrapeFn) {
   if (activeScrapes.has(urlKey)) {
-    console.log(`🔗 [Coalescing] Reusing active scrape promise for: ${urlKey}`);
+    vlog(`🔗 [Coalescing] Reusing active scrape promise for: ${urlKey}`);
     return activeScrapes.get(urlKey);
   }
 
@@ -169,6 +243,13 @@ const KIRYUU_PROXY_URL =
   process.env.KIRYUU_PROXY_URL || "https://proxy.akunncoc992.workers.dev/?url=";
 const YUUCDN_PROXY_URL =
   process.env.YUUCDN_PROXY_URL || "https://cdn.kopipaitboskuh.workers.dev";
+
+// meionovels.com dilindungi Cloudflare Managed Challenge: axios & cloudscraper
+// sama-sama kena 403 "Just a moment...". Worker proxy (dipakai modul lain) tembus,
+// jadi dijadikan strategi utama. Lihat meioFetch().
+const MEIO_BASE_URL = "https://meionovels.com";
+const MEIO_PROXY_URL =
+  process.env.MEIO_PROXY_URL || "https://proxy.kopipaitboskuh.workers.dev/?url=";
 
 function toKomikuWorkerImageUrl(imageUrl, req) {
   if (!imageUrl) return "";
@@ -334,6 +415,138 @@ function isCloudflareChallenge(html = "") {
   );
 }
 
+// Pangkas pesan error supaya log tidak dibanjiri body HTML/Buffer mentah.
+// Axios menempelkan seluruh response body ke err.message pada error HTTP,
+// sehingga satu kegagalan Cloudflare bisa menulis ratusan KB ke log.
+const LOG_ERR_MAX = Number(process.env.LOG_ERR_MAX || 180);
+function shortErr(err) {
+  if (err == null) return "unknown";
+  let msg;
+  if (typeof err === "string") msg = err;
+  else msg = err.response?.status || err.statusCode || err.code || err.message || String(err);
+  msg = String(msg).replace(/\s+/g, " ").trim();
+  return msg.length > LOG_ERR_MAX ? msg.slice(0, LOG_ERR_MAX) + "…" : msg;
+}
+
+// === meionovels.com ===
+// Sumber ini kena Cloudflare Managed Challenge. Urutan strategi:
+//   proxy worker (tembus) -> direct axios -> cloudscraper.
+// HTML Madara hasil proxy = konten asli, jadi selektor lama tetap valid.
+const MEIO_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+  Accept:
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+  "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
+  Referer: `${MEIO_BASE_URL}/`,
+};
+
+function meioProxyUrl(url, referer = `${MEIO_BASE_URL}/`) {
+  if (!MEIO_PROXY_URL) return "";
+  const separator = MEIO_PROXY_URL.includes("?") ? "" : "?url=";
+  return `${MEIO_PROXY_URL}${separator}${encodeURIComponent(url)}&referer=${encodeURIComponent(referer)}`;
+}
+
+async function meioFetch(url, options = {}) {
+  const perAttemptTimeout = options.timeout || 20000;
+  // Anggaran total supaya request gagal tidak menahan event loop sampai 60s.
+  const totalBudget = options.totalTimeout || 30000;
+  const method = (options.method || "GET").toUpperCase();
+  const headers = { ...MEIO_HEADERS, ...(options.headers || {}) };
+  const body = options.data;
+
+  const attempts = [];
+  const proxiedUrl = meioProxyUrl(url);
+  if (proxiedUrl) {
+    attempts.push({
+      label: "proxy",
+      run: async (timeout) => {
+        const { data } = await axios.request({
+          url: proxiedUrl,
+          method,
+          data: body,
+          headers,
+          timeout,
+        });
+        return data;
+      },
+    });
+  }
+
+  attempts.push({
+    label: "direct",
+    run: async (timeout) => {
+      const { data } = await axios.request({
+        url,
+        method,
+        data: body,
+        headers,
+        timeout,
+        maxRedirects: 5,
+      });
+      return data;
+    },
+  });
+
+  attempts.push({
+    label: "cloudscraper",
+    run: async (timeout) =>
+      cloudscraper.request({ uri: url, method, headers, timeout }),
+  });
+
+  const errors = [];
+  const startedAt = Date.now();
+  for (const attempt of attempts) {
+    const elapsed = Date.now() - startedAt;
+    if (elapsed >= totalBudget) {
+      errors.push(`${attempt.label}:skipped-budget-exceeded`);
+      continue;
+    }
+    const attemptTimeout = Math.min(perAttemptTimeout, totalBudget - elapsed);
+    try {
+      const html = await attempt.run(attemptTimeout);
+      if (typeof html === "string" && html.trim() && !isCloudflareChallenge(html)) {
+        return html;
+      }
+      errors.push(`${attempt.label}:cloudflare-challenge`);
+    } catch (err) {
+      errors.push(`${attempt.label}:${shortErr(err)}`);
+    }
+  }
+
+  throw new Error(`Meionovels fetch gagal (${url}): ${errors.join(" -> ")}`);
+}
+
+// Thumbnail meionovels.com juga kena Cloudflare (403 kalau diakses langsung),
+// jadi URL-nya dibelokkan lewat proxy image backend ini.
+function meioImageUrl(imageUrl, req) {
+  if (!imageUrl) return "";
+  const target = String(imageUrl).trim();
+  if (!target.includes("meionovels.com")) return target;
+  return `${getRequestBaseUrl(req)}/meionovels/image?url=${encodeURIComponent(target)}`;
+}
+
+// Rewrite thumbnail harus jalan di SETIAP response (termasuk cache-hit),
+// karena URL proxy bergantung host pemanggil. Data di cache selalu mentah.
+function rewriteMeioListPayload(payload, req) {
+  if (!payload || !Array.isArray(payload.data)) return payload;
+  return {
+    ...payload,
+    data: payload.data.map((item) => ({
+      ...item,
+      image: meioImageUrl(item.image, req),
+    })),
+  };
+}
+
+function rewriteMeioDetailPayload(payload, req) {
+  if (!payload || !payload.success || !payload.data) return payload;
+  return {
+    ...payload,
+    data: { ...payload.data, image: meioImageUrl(payload.data.image, req) },
+  };
+}
+
 async function kiryuuFetch(url, options = {}) {
   const targetUrl = kiryuuUrl(url);
   const referer = options.referer || `${KIRYUU_BASE_URL}/`;
@@ -343,6 +556,11 @@ async function kiryuuFetch(url, options = {}) {
   };
   const attempts = [];
 
+  const perAttemptTimeout = options.timeout || 20000;
+  // Anggaran waktu total untuk SEMUA strategi. Mencegah satu request yang gagal
+  // menahan event loop sampai 60s (3 strategi x 20s) yang membuat CPU 100%.
+  const totalBudget = options.totalTimeout || 25000;
+
   const proxiedUrl = kiryuuProxyUrl(targetUrl);
   if (proxiedUrl) {
     attempts.push({
@@ -350,7 +568,7 @@ async function kiryuuFetch(url, options = {}) {
       run: async () => {
         const { data } = await axios.get(proxiedUrl, {
           headers,
-          timeout: options.timeout || 20000,
+          timeout: perAttemptTimeout,
         });
         return data;
       },
@@ -362,7 +580,7 @@ async function kiryuuFetch(url, options = {}) {
     run: async () => {
       const { data } = await axios.get(targetUrl, {
         headers,
-        timeout: options.timeout || 20000,
+        timeout: perAttemptTimeout,
         maxRedirects: 5,
       });
       return data;
@@ -374,22 +592,28 @@ async function kiryuuFetch(url, options = {}) {
     run: async () =>
       cloudscraper.get(targetUrl, {
         headers,
-        timeout: options.timeout || 20000,
+        timeout: perAttemptTimeout,
       }),
   });
 
   const errors = [];
+  const startedAt = Date.now();
   for (const attempt of attempts) {
+    const elapsed = Date.now() - startedAt;
+    if (elapsed >= totalBudget) {
+      errors.push(`${attempt.label}:skipped-budget-exceeded`);
+      continue;
+    }
+    // Sisa anggaran: strategi terakhir tidak boleh melebihi totalBudget.
+    const attemptTimeout = Math.min(perAttemptTimeout, totalBudget - elapsed);
     try {
-      const html = await attempt.run();
+      const html = await attempt.run(attemptTimeout);
       if (typeof html === "string" && html.trim() && !isCloudflareChallenge(html)) {
         return html;
       }
       errors.push(`${attempt.label}:cloudflare-challenge`);
     } catch (err) {
-      errors.push(
-        `${attempt.label}:${err.response?.status || err.statusCode || err.code || err.message}`,
-      );
+      errors.push(`${attempt.label}:${shortErr(err)}`);
     }
   }
 
@@ -553,7 +777,7 @@ async function scrapeKiryuuPustaka({ page = 1 } = {}) {
   try {
     const url = page === 1 ? "/latest/" : `/latest/?the_page=${page}`;
 
-    console.log("Kiryuu terbaru URL:", kiryuuUrl(url));
+    vlog("Kiryuu terbaru URL:", kiryuuUrl(url));
 
     const data = await kiryuuFetch(url, { timeout: 20000 });
 
@@ -709,7 +933,7 @@ async function scrapeKiryuuDetail(url) {
       const manga_id = matchId ? matchId[1] : null;
 
       if (manga_id) {
-        const ajaxUrl = `https://v6.kiryuu.to/wp-admin/admin-ajax.php?manga_id=${manga_id}&page=1&action=chapter_list`;
+        const ajaxUrl = `${KIRYUU_BASE_URL}/wp-admin/admin-ajax.php?manga_id=${manga_id}&page=1&action=chapter_list`;
 
         const chapterHTML = await kiryuuFetch(ajaxUrl, {
           referer: url,
@@ -837,7 +1061,7 @@ async function scrapeKiryuuChapter(url) {
 
     // ================= SLUG =================
     const chapterSlug = url
-      .replace("https://v6.kiryuu.to/manga/", "")
+      .replace(/^https?:\/\/[^/]+\/manga\//, "")
       .replace(/\/$/, "");
 
     return {
@@ -847,7 +1071,7 @@ async function scrapeKiryuuChapter(url) {
       currentChapter: title,
       prev,
       next,
-      back_to_detail: `https://v6.kiryuu.to/manga/${mangaId}/`,
+      back_to_detail: `${KIRYUU_BASE_URL}/manga/${mangaId}/`,
       totalImages: images.length,
       images,
     };
@@ -866,7 +1090,7 @@ async function scrapeKiryuuChapter(url) {
 async function scrapeKomikuTerbaru() {
   try {
     const url = "https://komiku.org/";
-    console.log(`🕷️ Mengambil data dari ${url}...`);
+    vlog(`🕷️ Mengambil data dari ${url}...`);
 
     const { data } = await axios.get(url, {
       headers: {
@@ -938,7 +1162,7 @@ async function scrapeKomikuTerbaru() {
       });
     });
 
-    console.log(`✅ Berhasil ambil ${results.length} komik terbaru`);
+    vlog(`✅ Berhasil ambil ${results.length} komik terbaru`);
     return results;
   } catch (error) {
     console.error("❌ Gagal scraping Komiku:", error.message);
@@ -1497,7 +1721,7 @@ async function scrapeKomikuPustakaFilter({
 
     const url = `${base}?${params.toString()}`;
 
-    console.log("🔥 URL:", url);
+    vlog("🔥 URL:", url);
 
     const { data } = await axios.get(url, {
       headers: { "User-Agent": "Mozilla/5.0" },
@@ -1604,7 +1828,7 @@ async function scrapeMangakuPustaka({ page = 1 } = {}) {
         ? "https://mangaku.onl/komik/?order=update"
         : `https://mangaku.onl/komik/?page=${page}&order=update`;
 
-    console.log("🔥 Mangaku URL:", url);
+    vlog("🔥 Mangaku URL:", url);
 
     const { data } = await axios.get(url, {
       headers: {
@@ -3212,10 +3436,10 @@ async function scrapeMangakuChapter(fullUrl) {
 async function scrapeMeionovelsList(page = 1) {
   const url =
     page === 1
-      ? "https://meionovels.com/"
-      : `https://meionovels.com/page/${page}/`;
+      ? `${MEIO_BASE_URL}/`
+      : `${MEIO_BASE_URL}/page/${page}/`;
 
-  const { data } = await axios.get(url);
+  const data = await meioFetch(url);
   const $ = cheerio.load(data);
 
   const results = [];
@@ -3276,7 +3500,7 @@ async function scrapeMeionovelsList(page = 1) {
 
 async function scrapeMeionovelsDetail(url) {
   try {
-    const { data } = await axios.get(url);
+    const data = await meioFetch(url);
     const $ = cheerio.load(data);
 
     const title = $(".post-title h1").text().trim();
@@ -3318,22 +3542,19 @@ async function scrapeMeionovelsDetail(url) {
     let chapters = [];
 
     try {
-      const ajaxUrl = `https://meionovels.com/novel/${slug}/ajax/chapters/?t=1`;
+      const ajaxUrl = `${MEIO_BASE_URL}/novel/${slug}/ajax/chapters/?t=1`;
 
-      const res = await axios.post(
-        ajaxUrl,
-        {}, // body kosong
-        {
-          headers: {
-            "User-Agent": "Mozilla/5.0",
-            Referer: url,
-            "X-Requested-With": "XMLHttpRequest",
-            Accept: "*/*",
-          },
+      const ajaxHtml = await meioFetch(ajaxUrl, {
+        method: "POST",
+        data: {},
+        headers: {
+          Referer: url,
+          "X-Requested-With": "XMLHttpRequest",
+          Accept: "*/*",
         },
-      );
+      });
 
-      const $chap = cheerio.load(res.data);
+      const $chap = cheerio.load(ajaxHtml);
 
       $chap("li.wp-manga-chapter").each((i, el) => {
         const a = $chap(el).find("a");
@@ -3374,11 +3595,7 @@ async function scrapeMeionovelsDetail(url) {
 
 async function scrapeMeioChapter(url) {
   try {
-    const { data } = await axios.get(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-      },
-    });
+    const data = await meioFetch(url);
 
     const $ = cheerio.load(data);
 
@@ -3440,12 +3657,59 @@ app.get("/", (req, res) => {
   });
 });
 
+// APK home compatibility: use the existing Kiryuu latest scraper.
+// Popular rankings are left empty until an actual ranking source is available.
+app.get("/kiryuu/home", async (req, res) => {
+  const key = "kiryuu:app-home";
+  const cached = getCache(key);
+  if (cached) return res.json(cached);
+  try {
+    const response = await coalescedScrape(key, async () => {
+      const result = await scrapeKiryuuPustaka({ page: 1 });
+      if (!result.data?.length) throw new Error("Kiryuu latest data unavailable");
+      return { success: true, data: {
+        terbaru: rewriteKiryuuImages(result.data, req),
+        populer_manga: [], populer_manhwa: [], populer_manhua: []
+      }};
+    });
+    setCache(key, response, 60);
+    res.json(response);
+  } catch (error) {
+    res.status(502).json({ success: false, message: "Gagal mengambil beranda Kiryuu" });
+  }
+});
+
+// === Normalisasi thumbnail Komiku ===
+// Domain thumbnail.komiku.to (103.42.245.164) sudah mati — koneksi TCP timeout —
+// sedangkan thumbnail.komiku.org (Cloudflare) melayani path yang sama persis.
+// HTML sumber komiku masih menulis URL .to, jadi cover di detail/terbaru/home/list
+// tidak pernah termuat ("No Image"). Semua response JSON di bawah /komiku
+// (termasuk yang datang dari cache) dinormalisasi di satu titik ini.
+function fixKomikuThumb(value) {
+  if (typeof value === "string") {
+    return value.replace(/:\/\/thumbnail\.komiku\.to\//g, "://thumbnail.komiku.org/");
+  }
+  if (Array.isArray(value)) return value.map(fixKomikuThumb);
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = fixKomikuThumb(v);
+    return out;
+  }
+  return value;
+}
+
+app.use("/komiku", (_req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = (payload) => originalJson(fixKomikuThumb(payload));
+  next();
+});
+
 // === Route: Komiku Terbaru ===
 app.get("/komiku/terbaru", async (req, res) => {
   const cacheKey = "komiku:terbaru";
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
 
@@ -3470,7 +3734,7 @@ app.get("/komiku/home", async (_, res) => {
   const cacheKey = "komiku:home";
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
 
@@ -3542,7 +3806,7 @@ app.get("/komiku/detail/:slug", async (req, res) => {
   const cacheKey = `komiku:detail:${slug}`;
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
 
@@ -3573,7 +3837,7 @@ app.get("/komiku/chapter/:slug", async (req, res) => {
   const cacheKey = `komiku:chapter:${slug}`;
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
 
@@ -3591,7 +3855,7 @@ app.get("/komiku/chapter/:slug", async (req, res) => {
     });
 
     if (result && result.success) {
-      setCache(cacheKey, result, 7200); // 2 jam (7200 detik)
+      setCache(cacheKey, result, 1800); // 30 menit (dulu 2 jam)
     }
     res.json(result);
   } catch (err) {
@@ -3610,7 +3874,7 @@ app.get("/komiku/search", async (req, res) => {
   const cacheKey = `komiku:search:${q}`;
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
 
@@ -3673,7 +3937,7 @@ app.get("/komiku/list", async (req, res) => {
     const cacheKey = `komiku:list:p:${page}:h:${huruf}:t:${tipe}`;
     const cached = getCache(cacheKey);
     if (cached) {
-      console.log(`⚡ [Cache Hit] ${cacheKey}`);
+      vlog(`⚡ [Cache Hit] ${cacheKey}`);
       return res.json(cached);
     }
 
@@ -3709,7 +3973,7 @@ app.get("/genre/:genre", async (req, res) => {
   const cacheKey = `komiku:genre:${genre}:p:${currentPage}`;
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
 
@@ -3740,7 +4004,7 @@ app.get("/komiku/pustaka", async (req, res) => {
   const cacheKey = `komiku:pustaka:p:${page}`;
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
 
@@ -3776,7 +4040,7 @@ app.get("/komiku/filters", async (req, res) => {
   const cacheKey = "komiku:filters";
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
 
@@ -3789,7 +4053,7 @@ app.get("/komiku/filters", async (req, res) => {
       };
     });
 
-    setCache(cacheKey, responseData, 43200); // 12 jam
+    setCache(cacheKey, responseData, 3600); // 1 jam (dulu 12 jam)
     res.json(responseData);
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -3804,7 +4068,7 @@ app.get("/komiku/pustaka-filter", async (req, res) => {
     const cacheKey = `komiku:pustaka-filter:o:${orderby}:t:${tipe}:g:${genre}:g2:${genre2}:s:${status}:p:${page}`;
     const cached = getCache(cacheKey);
     if (cached) {
-      console.log(`⚡ [Cache Hit] ${cacheKey}`);
+      vlog(`⚡ [Cache Hit] ${cacheKey}`);
       return res.json(cached);
     }
 
@@ -3858,7 +4122,7 @@ app.get("/kiryuu/pustaka", async (req, res) => {
   const cacheKey = `kiryuu:pustaka:p:${page}`;
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
 
@@ -3897,7 +4161,7 @@ app.get("/kiryuu/filters", async (req, res) => {
   const cacheKey = "kiryuu:filters";
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
   try {
@@ -3905,7 +4169,7 @@ app.get("/kiryuu/filters", async (req, res) => {
       const data = await scrapeKiryuuFilters();
       return { success: true, data };
     });
-    setCache(cacheKey, responseData, 43200); // 12 jam
+    setCache(cacheKey, responseData, 3600); // 1 jam (dulu 12 jam)
     res.json(responseData);
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -3921,7 +4185,7 @@ app.get("/kiryuu/pustaka-filter", async (req, res) => {
     const cacheKey = `kiryuu:pustaka-filter:o:${orderby}:t:${tipe}:g:${genre}:g2:${genre2}:s:${status}:p:${page}`;
     const cached = getCache(cacheKey);
     if (cached) {
-      console.log(`⚡ [Cache Hit] ${cacheKey}`);
+      vlog(`⚡ [Cache Hit] ${cacheKey}`);
       return res.json(cached);
     }
 
@@ -3988,7 +4252,7 @@ app.get("/kiryuu/image", async (req, res) => {
       if (!isValidImage(buf)) return false;
       imageBuffer = buf;
       contentType = ct.startsWith("image/") ? ct : "image/jpeg";
-      console.log(`[Kiryuu Proxy] ✅ ${strategy} berhasil untuk ${url}`);
+      vlog(`[Kiryuu Proxy] ✅ ${strategy} berhasil untuk ${url}`);
       return true;
     }
 
@@ -4006,7 +4270,7 @@ app.get("/kiryuu/image", async (req, res) => {
           errors.push("direct:response-bukan-gambar-valid");
         }
       } catch (err) {
-        errors.push(`direct:${err.response?.status || err.code || err.message}`);
+        errors.push(`direct:${shortErr(err)}`);
       }
     }
 
@@ -4023,7 +4287,7 @@ app.get("/kiryuu/image", async (req, res) => {
           errors.push("yuucdn-worker:bukan-gambar-valid");
         }
       } catch (err) {
-        errors.push(`yuucdn-worker:${err.response?.status || err.code || err.message}`);
+        errors.push(`yuucdn-worker:${shortErr(err)}`);
       }
     }
 
@@ -4041,7 +4305,7 @@ app.get("/kiryuu/image", async (req, res) => {
           errors.push("worker:response-bukan-gambar-valid");
         }
       } catch (err) {
-        errors.push(`worker:${err.response?.status || err.code || err.message}`);
+        errors.push(`worker:${shortErr(err)}`);
       }
     }
 
@@ -4067,7 +4331,7 @@ app.get("/kiryuu/image", async (req, res) => {
           errors.push("cloudscraper:response-terlalu-kecil-atau-bukan-buffer");
         }
       } catch (err) {
-        errors.push(`cloudscraper:${err.message}`);
+        errors.push(`cloudscraper:${shortErr(err)}`);
       }
     }
 
@@ -4152,8 +4416,19 @@ app.get("/komiku/image", async (req, res) => {
 
     res.set("Content-Type", contentType);
     res.set("Cache-Control", "public, max-age=604800, s-maxage=604800");
+    // Destroy upstream stream kalau klien putus di tengah jalan, supaya
+    // buffer tidak menggantung di off-heap (penyebab RSS membengkak).
+    res.on("close", () => response.data.destroy?.());
+    response.data.on("error", () => res.destroy?.());
     response.data.pipe(res);
   } catch (err) {
+    const status = err.response?.status;
+    if (status === 410 || status === 403) {
+      vlog(`🕒 [Komiku Image] Link expired/blocked (${status})`);
+      return res
+        .status(410)
+        .send("Link gambar Komiku sudah expired. Ambil ulang dari /komiku/chapter/:slug");
+    }
     console.error("Komiku image proxy error:", err.message);
     res.status(502).send("Gagal mengambil gambar Komiku");
   }
@@ -4184,9 +4459,27 @@ app.get("/doujindesu/image", async (req, res) => {
       "Cache-Control": "public, max-age=86400",
     });
 
+    // Destroy upstream stream kalau klien putus di tengah jalan.
+    res.on("close", () => response.data.destroy?.());
+    response.data.on("error", () => res.destroy?.());
     response.data.pipe(res);
   } catch (err) {
-    res.status(500).send("Gagal mengambil gambar: " + err.message);
+    const status = err.response?.status;
+
+    // Link presigned S3 Doujindesu (amz-*.desu.pics) punya masa berlaku
+    // keras lewat X-Amz-Expires (biasanya 24 jam). Setelah lewat, Cloudflare
+    // membalas 410 "link expired". Ini BUKAN kegagalan server, jadi jangan
+    // dilaporkan sebagai 500 — beri 410 agar klien tahu harus re-scrape.
+    if (status === 410 || status === 403) {
+      vlog(`🕒 [Doujindesu Image] Link expired/blocked (${status})`);
+      return res
+        .status(410)
+        .send(
+          "Link gambar Doujindesu sudah expired. Ambil ulang dari /doujindesu/chapter/:slug",
+        );
+    }
+
+    res.status(502).send("Gagal mengambil gambar: " + err.message);
   }
 });
 
@@ -4202,13 +4495,13 @@ app.get("/kiryuu/detail/:slug", async (req, res) => {
   const cacheKey = `kiryuu:detail:${slug}`;
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
 
   try {
     const result = await coalescedScrape(cacheKey, async () => {
-      const fullUrl = `https://v6.kiryuu.to/manga/${slug}/`;
+      const fullUrl = `${KIRYUU_BASE_URL}/manga/${slug}/`;
       const details = await scrapeKiryuuDetail(fullUrl);
       return rewriteKiryuuImages(details, req);
     });
@@ -4232,19 +4525,19 @@ app.get(/^\/kiryuu\/chapter\/(.+)/, async (req, res) => {
   const cacheKey = `kiryuu:chapter:${slug}`;
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
 
   try {
     const result = await coalescedScrape(cacheKey, async () => {
-      const fullUrl = `https://v6.kiryuu.to/manga/${slug}/`;
+      const fullUrl = `${KIRYUU_BASE_URL}/manga/${slug}/`;
       const chapter = await scrapeKiryuuChapter(fullUrl);
       return rewriteKiryuuImages(chapter, req);
     });
 
     if (result && result.success) {
-      setCache(cacheKey, result, 7200); // 2 jam
+      setCache(cacheKey, result, 1800); // 30 menit (dulu 2 jam)
     }
     res.json(result);
   } catch (err) {
@@ -4309,7 +4602,7 @@ app.get(
     const cacheKey = `doujindesu:${type}:p:${page}`;
     const cached = getCache(cacheKey);
     if (cached) {
-      console.log(`⚡ [Cache Hit] ${cacheKey}`);
+      vlog(`⚡ [Cache Hit] ${cacheKey}`);
       return res.json(cached);
     }
 
@@ -4336,7 +4629,7 @@ app.get("/doujindesu/filters", async (_req, res) => {
   try {
     const data = await coalescedScrape(cacheKey, scrapeDoujindesuFilters);
     const result = { success: true, data };
-    setCache(cacheKey, result, 86400);
+    setCache(cacheKey, result, 3600); // 1 jam (dulu 24 jam)
     return res.json(result);
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
@@ -4372,7 +4665,7 @@ app.get(
     const cacheKey = `sekte:terbaru:p:${page}`;
     const cached = getCache(cacheKey);
     if (cached) {
-      console.log(`⚡ [Cache Hit] ${cacheKey}`);
+      vlog(`⚡ [Cache Hit] ${cacheKey}`);
       return res.json(cached);
     }
 
@@ -4398,7 +4691,7 @@ app.get(["/sekte/filters", "/sektedoujin/filters"], async (_req, res) => {
   try {
     const data = await coalescedScrape(cacheKey, scrapeSekteFilters);
     const result = { success: true, data };
-    setCache(cacheKey, result, 86400);
+    setCache(cacheKey, result, 3600); // 1 jam (dulu 24 jam)
     return res.json(result);
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
@@ -4441,7 +4734,7 @@ app.get(["/sekte/detail/:slug", "/sektedoujin/detail/:slug"], async (req, res) =
   const cacheKey = `sekte:detail:${slug}`;
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
 
@@ -4472,7 +4765,7 @@ app.get(["/sekte/search", "/sektedoujin/search"], async (req, res) => {
   const cacheKey = `sekte:search:${q}:p:${currentPage}`;
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
 
@@ -4501,7 +4794,7 @@ app.get([/^\/sekte\/chapter\/(.+)/, /^\/sektedoujin\/chapter\/(.+)/], async (req
   const cacheKey = `sekte:chapter:${slug}`;
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
 
@@ -4511,7 +4804,7 @@ app.get([/^\/sekte\/chapter\/(.+)/, /^\/sektedoujin\/chapter\/(.+)/], async (req
       return res.status(500).json(result);
     }
 
-    setCache(cacheKey, result, 7200); // 2 jam
+    setCache(cacheKey, result, 1800); // 30 menit (dulu 2 jam)
     res.json(result);
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -4530,7 +4823,7 @@ app.get("/doujindesu/detail/:slug", async (req, res) => {
   const cacheKey = `doujindesu:detail:${slug}`;
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
 
@@ -4562,7 +4855,7 @@ app.get("/doujindesu/search", async (req, res) => {
   const cacheKey = `doujindesu:search:${q}:p:${currentPage}`;
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
 
@@ -4592,7 +4885,7 @@ app.get(/^\/doujindesu\/chapter\/(.+)/, async (req, res) => {
   const cacheKey = `doujindesu:chapter:${slug}`;
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
 
@@ -4603,7 +4896,7 @@ app.get(/^\/doujindesu\/chapter\/(.+)/, async (req, res) => {
     }
 
     const mappedResult = rewriteDoujindesuImages(result, req);
-    setCache(cacheKey, mappedResult, 7200); // 2 jam
+    setCache(cacheKey, mappedResult, 1800); // 30 menit (dulu 2 jam)
     res.json(mappedResult);
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -4631,7 +4924,7 @@ app.get(/^\/mangaku\/chapter\/(.+)/, async (req, res) => {
   const cacheKey = `mangaku:chapter:${slug}`;
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
 
@@ -4642,7 +4935,7 @@ app.get(/^\/mangaku\/chapter\/(.+)/, async (req, res) => {
     });
 
     if (result && result.success) {
-      setCache(cacheKey, result, 7200); // 2 jam
+      setCache(cacheKey, result, 1800); // 30 menit (dulu 2 jam)
     }
     res.json(result);
   } catch (err) {
@@ -4659,7 +4952,7 @@ app.get("/mangaku/pustaka", async (req, res) => {
   const cacheKey = `mangaku:pustaka:p:${page}`;
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
 
@@ -4698,7 +4991,7 @@ app.get("/mangaku/detail/:slug", async (req, res) => {
   const cacheKey = `mangaku:detail:${slug}`;
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
 
@@ -4734,7 +5027,7 @@ app.get("/mangaku/search", async (req, res) => {
   const cacheKey = `mangaku:search:${q}:p:${currentPage}`;
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
 
@@ -4805,13 +5098,13 @@ app.get(/^\/meionovels\/chapter\/(.*)/, async (req, res) => {
   const cacheKey = `meionovels:chapter:${slug}`;
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
     return res.json(cached);
   }
 
   try {
     const result = await coalescedScrape(cacheKey, async () => {
-      const fullUrl = `https://meionovels.com/novel/${slug}`;
+      const fullUrl = `${MEIO_BASE_URL}/novel/${slug}`;
       const chapter = await scrapeMeioChapter(fullUrl);
       const series = slug.split("/")[0];
       return {
@@ -4821,7 +5114,7 @@ app.get(/^\/meionovels\/chapter\/(.*)/, async (req, res) => {
     });
 
     if (result && result.success) {
-      setCache(cacheKey, result, 7200); // 2 jam
+      setCache(cacheKey, result, 1800); // 30 menit (dulu 2 jam)
     }
     res.json(result);
   } catch (err) {
@@ -4840,8 +5133,8 @@ app.get("/meionovels/pustaka", async (req, res) => {
   const cacheKey = `meionovels:pustaka:p:${page}`;
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
-    return res.json(cached);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(rewriteMeioListPayload(cached, req));
   }
 
   try {
@@ -4856,7 +5149,11 @@ app.get("/meionovels/pustaka", async (req, res) => {
     });
 
     setCache(cacheKey, responseData, 60); // 1 menit
-    res.json(responseData);
+
+    // Rewrite thumbnail per-request (URL proxy bergantung host pemanggil).
+    // Data di cache tetap mentah supaya request internal (127.0.0.1) tidak
+    // meracuni URL untuk pengunjung publik.
+    res.json(rewriteMeioListPayload(responseData, req));
   } catch (err) {
     res.json({
       success: false,
@@ -4877,26 +5174,118 @@ app.get("/meionovels/detail/:slug", async (req, res) => {
   const cacheKey = `meionovels:detail:${slug}`;
   const cached = getCache(cacheKey);
   if (cached) {
-    console.log(`⚡ [Cache Hit] ${cacheKey}`);
-    return res.json(cached);
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(rewriteMeioDetailPayload(cached, req));
   }
 
   try {
-    const result = await coalescedScrape(cacheKey, () => {
-      const fullUrl = `https://meionovels.com/novel/${slug}/`;
+    const result = await coalescedScrape(cacheKey, async () => {
+      const fullUrl = `${MEIO_BASE_URL}/novel/${slug}/`;
       return scrapeMeionovelsDetail(fullUrl);
     });
 
     if (result && result.success) {
       setCache(cacheKey, result, 900); // 15 menit
     }
-    res.json(result);
+
+    // Rewrite thumbnail per-request (di luar cache) supaya request internal
+    // tidak meracuni URL gambar untuk pengunjung publik.
+    res.json(rewriteMeioDetailPayload(result, req));
   } catch (err) {
     console.error("Route error:", err.message);
     res.status(500).json({
       success: false,
       message: "Terjadi kesalahan pada server",
     });
+  }
+});
+
+// Proxy thumbnail meionovels.com (host ini kena Cloudflare; akses langsung 403).
+// Ambil via worker proxy (sama seperti meioFetch), lalu stream ke klien.
+app.get("/meionovels/image", async (req, res) => {
+  try {
+    const imageUrl = req.query.url || "";
+    if (!imageUrl) return res.status(400).send("Missing url");
+
+    let host = "";
+    try {
+      host = new URL(imageUrl).hostname;
+    } catch (e) {
+      host = "";
+    }
+    if (host !== "meionovels.com" && !host.endsWith(".meionovels.com")) {
+      return res.status(403).send("Image host not allowed");
+    }
+
+    const cached = getImageCache(imageUrl);
+    if (cached) {
+      res.set("Content-Type", cached.contentType);
+      res.set("Cache-Control", "public, max-age=604800, s-maxage=604800");
+      return res.send(cached.buffer);
+    }
+
+    const headers = {
+      "User-Agent": MEIO_HEADERS["User-Agent"],
+      Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+      Referer: `${MEIO_BASE_URL}/`,
+    };
+
+    const errors = [];
+    let imageBuffer;
+    let contentType = "image/jpeg";
+
+    const fetchImage = async (targetUrl, label) => {
+      const response = await axios.get(targetUrl, {
+        responseType: "arraybuffer",
+        timeout: 15000,
+        headers,
+        httpsAgent: agentForImageUrl(targetUrl),
+      });
+      const ct = String(response.headers["content-type"] || "");
+      if (Buffer.isBuffer(response.data) && response.data.length >= 200 && ct.startsWith("image/")) {
+        imageBuffer = response.data;
+        contentType = ct;
+        return true;
+      }
+      errors.push(`${label}:bukan-gambar-valid`);
+      return false;
+    };
+
+    // Strategi 1: worker proxy (tembus Cloudflare)
+    const proxiedUrl = meioProxyUrl(imageUrl);
+    if (proxiedUrl) {
+      try {
+        if (await fetchImage(proxiedUrl, "proxy")) {
+          vlog(`[Meionovels Image] ✅ proxy berhasil untuk ${imageUrl}`);
+        }
+      } catch (err) {
+        errors.push(`proxy:${shortErr(err)}`);
+      }
+    }
+
+    // Strategi 2: direct (jaga-jaga kalau Cloudflare dimatikan)
+    if (!imageBuffer) {
+      try {
+        if (await fetchImage(imageUrl, "direct")) {
+          vlog(`[Meionovels Image] ✅ direct berhasil untuk ${imageUrl}`);
+        }
+      } catch (err) {
+        errors.push(`direct:${shortErr(err)}`);
+      }
+    }
+
+    if (!imageBuffer) {
+      console.error(`[Meionovels Image] gagal: ${errors.join(" -> ")}`);
+      return res.status(502).send("Gagal mengambil gambar Meionovels");
+    }
+
+    setImageCache(imageUrl, imageBuffer, contentType);
+    res.set("Content-Type", contentType);
+    res.set("Cache-Control", "public, max-age=604800, s-maxage=604800");
+    res.send(imageBuffer);
+  } catch (err) {
+    console.error("Meionovels image proxy error:", err.message);
+    res.status(502).send("Gagal mengambil gambar Meionovels");
   }
 });
 
@@ -4916,9 +5305,13 @@ require("./qimanga")(app, { getCache, setCache, coalescedScrape, getImageCache, 
 require("./demon")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 require("./vortex")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 require("./mgeko")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
-require("./kagane")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
+// [DIMATIKAN 2026-09-21] kagane.to sudah tidak dipakai & memicu crash loop
+// (Cloudflare challenge → scrape gagal → 87x restart + log spam).
+// Backup: index.js.bak-kagane-off-20260921-083951
+// require("./kagane")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 require("./lua")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 require("./mgread")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
+require("./mist")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 
 app.listen(PORT, () =>
   console.log(`🚀 Server jalan di http://localhost:${PORT}`),
