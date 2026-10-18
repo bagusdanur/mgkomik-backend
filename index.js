@@ -5308,6 +5308,82 @@ app.get("/meionovels/pustaka", async (req, res) => {
   }
 });
 
+// ── Search novel (MeioNovels) ──
+// Sumbernya memakai theme Madara (WordPress). Pencarian lewat halaman (?s=)
+// SELALU kosong dari sisi server karena daftar hasilnya dimuat via AJAX,
+// jadi jangan dipakai. Endpoint aslinya yang dipakai browser mereka:
+//   POST /wp-admin/admin-ajax.php
+//        action=wp-manga-search-manga&title=<q>
+// Balasannya JSON bersih { success, data:[{ title, url, type }] } — tanpa
+// HTML, jadi tidak perlu parsing dan tidak ada risiko selector berubah.
+app.get("/meionovels/search", async (req, res) => {
+  const q = String(req.query.q || "").trim();
+  if (!q) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Masukkan parameter ?q=" });
+  }
+
+  const cacheKey = `meionovels:search:${q.toLowerCase()}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    vlog(`⚡ [Cache Hit] ${cacheKey}`);
+    return res.json(cached);
+  }
+
+  try {
+    const responseData = await coalescedScrape(cacheKey, async () => {
+      const body = new URLSearchParams({
+        action: "wp-manga-search-manga",
+        title: q,
+      }).toString();
+
+      const { data } = await axios.post(
+        `${MEIO_BASE_URL}/wp-admin/admin-ajax.php`,
+        body,
+        {
+          headers: {
+            ...MEIO_HEADERS,
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "X-Requested-With": "XMLHttpRequest",
+          },
+          timeout: 15000,
+        }
+      );
+
+      const payload = typeof data === "string" ? JSON.parse(data) : data;
+      const items = Array.isArray(payload?.data) ? payload.data : [];
+
+      const results = [];
+      for (const item of items) {
+        const link = String(item?.url || "");
+        if (!item?.title || !link) continue;
+
+        // URL sumber selalu berbentuk https://meionovels.com/novel/<slug>/
+        const part = link.split("/novel/")[1];
+        if (!part) continue;
+        const slug = part.replace(/\/+$/, "");
+        if (!slug) continue;
+
+        results.push({
+          source: "meionovels",
+          title: String(item.title),
+          slug,
+          detail_link: link,
+        });
+      }
+
+      return { success: true, total: results.length, data: results };
+    });
+
+    setCache(cacheKey, responseData, 600); // 10 menit
+    res.json(responseData);
+  } catch (err) {
+    console.error("Meionovels search error:", err.message);
+    res.status(502).json({ success: false, message: "Gagal mencari novel" });
+  }
+});
+
 app.get("/meionovels/detail/:slug", async (req, res) => {
   const { slug } = req.params;
   if (!slug) {
