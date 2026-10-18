@@ -5308,6 +5308,29 @@ app.get("/meionovels/pustaka", async (req, res) => {
   }
 });
 
+// Ambil HANYA cover dari halaman detail novel (tanpa daftar chapter).
+// Dipakai untuk mempercantik hasil search: endpoint AJAX pencarian sumbernya
+// hanya mengirim judul + URL, jadi cover harus diambil terpisah. Dibuat
+// ringan dan paralel; kegagalan satu novel tidak menggagalkan pencarian.
+async function fetchMeionovelsCover(novelUrl) {
+  try {
+    const data = await meioFetch(novelUrl, { timeout: 12000, totalTimeout: 15000 });
+    const $ = cheerio.load(data);
+    const raw =
+      $(".summary_image img").attr("src") ||
+      $(".summary_image img").attr("data-src") ||
+      $(".summary_image img").attr("data-lazy-src") ||
+      "";
+    if (!raw) return "";
+    // URL kadang protokol-relative (//domain/...) atau relatif
+    if (raw.startsWith("//")) return `https:${raw}`;
+    if (raw.startsWith("/")) return `${MEIO_BASE_URL}${raw}`;
+    return raw;
+  } catch {
+    return "";
+  }
+}
+
 // ── Search novel (MeioNovels) ──
 // Sumbernya memakai theme Madara (WordPress). Pencarian lewat halaman (?s=)
 // SELALU kosong dari sisi server karena daftar hasilnya dimuat via AJAX,
@@ -5328,7 +5351,7 @@ app.get("/meionovels/search", async (req, res) => {
   const cached = getCache(cacheKey);
   if (cached) {
     vlog(`⚡ [Cache Hit] ${cacheKey}`);
-    return res.json(cached);
+    return res.json(rewriteMeioListPayload(cached, req));
   }
 
   try {
@@ -5373,11 +5396,22 @@ app.get("/meionovels/search", async (req, res) => {
         });
       }
 
+      // Endpoint pencarian sumbernya tidak mengirim cover, jadi ambil dari
+      // halaman detail tiap hasil — paralel, kegagalan satu novel diabaikan.
+      // Hasil akhir masuk cache, jadi biaya fetch ini dibayar sekali per query.
+      await Promise.all(
+        results.map(async (r) => {
+          r.image = await fetchMeionovelsCover(r.detail_link);
+        })
+      );
+
       return { success: true, total: results.length, data: results };
     });
 
     setCache(cacheKey, responseData, 600); // 10 menit
-    res.json(responseData);
+    // Rewrite cover ke proxy /meionovels/image di SETIAP response (termasuk
+    // cache-hit) — host aslinya dibelakang Cloudflare, akses langsung bisa 403.
+    res.json(rewriteMeioListPayload(responseData, req));
   } catch (err) {
     console.error("Meionovels search error:", err.message);
     res.status(502).json({ success: false, message: "Gagal mencari novel" });
