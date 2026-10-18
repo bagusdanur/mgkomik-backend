@@ -534,6 +534,47 @@ module.exports.registerRoutes = function registerRoutes(app, deps = {}) {
    * GET /stream/resolve?url=<embed-url>
    * Ubah URL embed player menjadi URL video langsung + versi proxy.
    */
+  // ── PRE-RESOLVE (warm cache) ─────────────────────────────────────────────
+  // Dipanggil otakudesu.js saat halaman episode dibuka: embed di-resolve
+  // SEBELUM pengguna menekan tombol server, jadi klik = cache hit (hemat
+  // resolve ±2 dtk yang terasa). Hanya provider non-UA-sensitive yang
+  // dihangatkan — provider terikat UA (googlevideo) sia-sia karena kunci
+  // cache-nya per-penonton; mega/blogs juga tidak dihangatkan.
+  const preResolving = new Set();
+  const PRE_RESOLVE_PROVIDERS = new Set(["filedon", "vidhide", "odcdn", "odstream"]);
+
+  async function preResolveStream(embedUrl, userAgent) {
+    try {
+      if (typeof embedUrl !== "string" || !embedUrl.startsWith("http")) return;
+      const provider = detectProvider(embedUrl);
+      if (!PRE_RESOLVE_PROVIDERS.has(provider)) return;
+
+      // Format kunci HARUS sama persis dengan route /stream/resolve
+      // (semua provider ini non-UA-sensitive → kunci tanpa UA).
+      const cacheKey = `stream_resolve_${provider}_${embedUrl}`;
+      if (getCache(cacheKey) || preResolving.has(cacheKey)) return;
+      preResolving.add(cacheKey);
+      try {
+        const info = await resolveStream(embedUrl, userAgent);
+        if (!info || !info.success || !info.url) return;
+        const base = PUBLIC_BASE || "https://apiv2.ryukomik.web.id";
+        if (info.megaToken) {
+          info.url_proxy = `${base}/stream/mega/${info.megaToken}`;
+        } else {
+          info.url_proxy = `${base}/stream/proxy/${Buffer.from(info.url).toString("base64url")}`;
+        }
+        delete info.megaToken;
+        const ttlSeconds = provider === "vidhide" ? 60 * 120 : 60 * 30;
+        setCache(cacheKey, info, ttlSeconds);
+      } finally {
+        preResolving.delete(cacheKey);
+      }
+    } catch (_) {
+      /* pre-resolve terbaik saja — kegagalan tidak boleh mengganggu */
+    }
+  }
+  module.exports.preResolveStream = preResolveStream;
+
   app.get("/stream/resolve", async (req, res) => {
     const url = req.query.url;
     if (!url) return res.status(400).json({ success: false, message: "Parameter 'url' diperlukan" });
