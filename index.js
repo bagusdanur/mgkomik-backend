@@ -4522,6 +4522,96 @@ function isAllowedKomikuImageUrl(url) {
   }
 }
 
+// Beberapa host image komiku.to bisa TIDAK merespons dari VPS — bahkan
+// untuk file yang valid — sementara host lain menyediakan path yang persis
+// sama (terbukti saat diuji: image2 membalas 200, sedangkan image9/7/5/3
+// timeout di tahap TCP). Karena path file di semua mirror identik, host asal
+// yang mati tidak boleh langsung membalas 502 — alihkan ke mirror dulu.
+// Urutan dimulai dari host yang terbukti hidup.
+const KOMIKU_IMAGE_MIRRORS = [
+  "image2.komiku.to",
+  "image5.komiku.to",
+  "image3.komiku.to",
+  "image6.komiku.to",
+  "image8.komiku.to",
+  "image4.komiku.to",
+  "image1.komiku.to",
+  "image7.komiku.to",
+  "image9.komiku.to",
+];
+
+// Timeout per percobaan. Host yang hidup umumnya membalas <2 detik; yang
+// lebih lambat tetap sempat dihitung sebelum dianggap mati.
+const KOMIKU_IMAGE_TIMEOUT_MS = 8000;
+// Batas total percobaan (host asal + mirror) supaya kasus semua-host-mati
+// tidak membuat pengunjung menunggu puluhan detik tanpa hasil.
+const KOMIKU_IMAGE_MAX_ATTEMPTS = 4;
+
+function komikuImageUrlOn(imageUrl, hostname) {
+  try {
+    const parsed = new URL(imageUrl);
+    parsed.hostname = hostname;
+    return parsed.toString();
+  } catch {
+    return imageUrl;
+  }
+}
+
+// Ambil gambar komiku: host asal dulu, lalu mirror bila host asal tidak
+// merespons sama sekali (timeout/refused/reset) atau membalas 5xx.
+// Balasan 4xx dari server yang HIDUP langsung dilempar — berarti file
+// memang tidak ada atau link expired, bukan masalah koneksi — jadi tidak
+// membuang waktu mencoba mirror.
+async function fetchKomikuImage(imageUrl) {
+  let hostname = "";
+  try {
+    hostname = new URL(imageUrl).hostname;
+  } catch {
+    hostname = "";
+  }
+
+  const candidates = [imageUrl];
+  for (const mirror of KOMIKU_IMAGE_MIRRORS) {
+    if (candidates.length >= KOMIKU_IMAGE_MAX_ATTEMPTS) break;
+    if (mirror === hostname) continue;
+    candidates.push(komikuImageUrlOn(imageUrl, mirror));
+  }
+
+  let lastError = null;
+  for (let i = 0; i < candidates.length; i += 1) {
+    const target = candidates[i];
+    try {
+      const response = await axios.get(target, {
+        responseType: "stream",
+        timeout: KOMIKU_IMAGE_TIMEOUT_MS,
+        httpsAgent: agentForImageUrl(target),
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+          Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+          "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
+          Referer: "https://komiku.to/",
+        },
+      });
+      if (i > 0) {
+        vlog(
+          `🔄 [Komiku Image] Host asal tidak merespons, pakai mirror ${new URL(target).hostname}`,
+        );
+      }
+      return response;
+    } catch (err) {
+      lastError = err;
+      const status = err.response?.status;
+      if (typeof status === "number" && status >= 400 && status < 500) {
+        throw err;
+      }
+      // error jaringan atau 5xx → lanjut ke mirror berikutnya
+    }
+  }
+
+  throw lastError || new Error("Gagal mengambil gambar Komiku");
+}
+
 app.get("/komiku/image", async (req, res) => {
   try {
     const imageUrl = req.query.url || "";
@@ -4534,18 +4624,7 @@ app.get("/komiku/image", async (req, res) => {
       return res.status(403).send("Image host not allowed");
     }
 
-    const response = await axios.get(imageUrl, {
-      responseType: "stream",
-      timeout: 30000,
-      httpsAgent: agentForImageUrl(imageUrl),
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-        "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
-        Referer: "https://komiku.to/",
-      },
-    });
+    const response = await fetchKomikuImage(imageUrl);
 
     // Hancurkan stream jika koneksi client terputus sebelum gambar selesai diunduh
     req.on("close", () => {
