@@ -4540,12 +4540,59 @@ const KOMIKU_IMAGE_MIRRORS = [
   "image9.komiku.to",
 ];
 
-// Timeout per percobaan. Host yang hidup umumnya membalas <2 detik; yang
-// lebih lambat tetap sempat dihitung sebelum dianggap mati.
-const KOMIKU_IMAGE_TIMEOUT_MS = 8000;
+// Timeout per percobaan. Host yang hidup terukur membalas 0,11 detik, jadi
+// batas ini hanya benar-benar dipakai oleh host yang TIDAK merespons — dan
+// menunggunya adalah biaya lambatnya sembilan detik tadi. Diringkas jadi 3
+// detik: host hidup yang lambat tetap sempat masuk, yang mati cepat dilepas.
+const KOMIKU_IMAGE_TIMEOUT_MS = 3000;
 // Batas total percobaan (host asal + mirror) supaya kasus semua-host-mati
 // tidak membuat pengunjung menunggu puluhan detik tanpa hasil.
 const KOMIKU_IMAGE_MAX_ATTEMPTS = 4;
+
+// Catatan: host yang TIDAK merespons sama sekali (timeout/refused/reset)
+// ditandai mati sementara supaya tidak ditelepon lagi tiap gambar. Tanpa
+// ini, satu halaman chapter berisi 20 gambar dari host mati akan menunggu
+// timeout 20 kali; dengan penandaan hanya gambar pertama yang membayar.
+// Ini MEMANGKAS beban VPS (percobaan yang pasti gagal dibuang), tidak
+// menambahnya — dan tanpa setInterval apa pun: entri kedaluwarsa dibersihkan
+// saat dipakai, jadi tidak ada pekerjaan latar belakang baru.
+const KOMIKU_IMAGE_HOST_DEAD_MS = 10 * 60 * 1000;
+const komikuImageHostDeadUntil = new Map();
+
+function komikuImageHostOf(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
+  }
+}
+
+function komikuImageHostIsDead(hostname) {
+  if (!hostname) return false;
+  const deadUntil = komikuImageHostDeadUntil.get(hostname);
+  if (!deadUntil) return false;
+  if (Date.now() >= deadUntil) {
+    // Masa blokir habis → coba lagi seperti biasa.
+    komikuImageHostDeadUntil.delete(hostname);
+    return false;
+  }
+  return true;
+}
+
+function komikuImageHostMarkDead(hostname) {
+  if (!hostname) return;
+  komikuImageHostDeadUntil.set(hostname, Date.now() + KOMIKU_IMAGE_HOST_DEAD_MS);
+  // Penjaga ukuran map tetap kecil kalau ada host yang tak pernah dicek lagi.
+  if (komikuImageHostDeadUntil.size > 64) {
+    komikuImageHostDeadUntil.clear();
+  }
+}
+
+function komikuImageHostMarkAlive(hostname) {
+  if (hostname && komikuImageHostDeadUntil.has(hostname)) {
+    komikuImageHostDeadUntil.delete(hostname);
+  }
+}
 
 function komikuImageUrlOn(imageUrl, hostname) {
   try {
@@ -4563,23 +4610,27 @@ function komikuImageUrlOn(imageUrl, hostname) {
 // memang tidak ada atau link expired, bukan masalah koneksi — jadi tidak
 // membuang waktu mencoba mirror.
 async function fetchKomikuImage(imageUrl) {
-  let hostname = "";
-  try {
-    hostname = new URL(imageUrl).hostname;
-  } catch {
-    hostname = "";
+  const hostname = komikuImageHostOf(imageUrl);
+
+  const allCandidates = [imageUrl];
+  for (const mirror of KOMIKU_IMAGE_MIRRORS) {
+    if (mirror === hostname) continue;
+    allCandidates.push(komikuImageUrlOn(imageUrl, mirror));
   }
 
-  const candidates = [imageUrl];
-  for (const mirror of KOMIKU_IMAGE_MIRRORS) {
-    if (candidates.length >= KOMIKU_IMAGE_MAX_ATTEMPTS) break;
-    if (mirror === hostname) continue;
-    candidates.push(komikuImageUrlOn(imageUrl, mirror));
-  }
+  // Buang host yang sedang ditandai mati. Kalau semuanya ikut terbuang, pakai
+  // daftar penuh kembali supaya tetap ada yang dicoba — host bisa saja sudah
+  // pulih dan penandaan lama tidak boleh mengunci semuanya.
+  let candidates = allCandidates.filter(
+    (candidate) => !komikuImageHostIsDead(komikuImageHostOf(candidate)),
+  );
+  if (candidates.length === 0) candidates = allCandidates;
+  candidates = candidates.slice(0, KOMIKU_IMAGE_MAX_ATTEMPTS);
 
   let lastError = null;
   for (let i = 0; i < candidates.length; i += 1) {
     const target = candidates[i];
+    const targetHost = komikuImageHostOf(target);
     try {
       const response = await axios.get(target, {
         responseType: "stream",
@@ -4593,9 +4644,10 @@ async function fetchKomikuImage(imageUrl) {
           Referer: "https://komiku.to/",
         },
       });
+      komikuImageHostMarkAlive(targetHost);
       if (i > 0) {
         vlog(
-          `🔄 [Komiku Image] Host asal tidak merespons, pakai mirror ${new URL(target).hostname}`,
+          `🔄 [Komiku Image] Host asal tidak merespons, pakai mirror ${targetHost}`,
         );
       }
       return response;
@@ -4605,7 +4657,12 @@ async function fetchKomikuImage(imageUrl) {
       if (typeof status === "number" && status >= 400 && status < 500) {
         throw err;
       }
-      // error jaringan atau 5xx → lanjut ke mirror berikutnya
+      // Tidak ada balasan sama sekali (status kosong = timeout/refused/reset)
+      // → tandai mati sementara. Balasan 5xx tidak ditandai karena servernya
+      // tetap terjangkau, cuma sedang bermasalah.
+      if (!status) {
+        komikuImageHostMarkDead(targetHost);
+      }
     }
   }
 
