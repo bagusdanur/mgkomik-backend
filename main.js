@@ -120,6 +120,19 @@ function normalizeHtmlPayload(payload) {
   return null;
 }
 
+// Pangkas pesan error supaya log tidak dibanjiri body HTML/Buffer mentah.
+// Axios menempelkan seluruh response body ke err.message pada error HTTP,
+// sehingga satu kegagalan Cloudflare bisa menulis ratusan KB ke log.
+const LOG_ERR_MAX = Number(process.env.LOG_ERR_MAX || 180);
+function shortErr(err) {
+  if (err == null) return "unknown";
+  let msg;
+  if (typeof err === "string") msg = err;
+  else msg = err.response?.status || err.statusCode || err.code || err.message || String(err);
+  msg = String(msg).replace(/\s+/g, " ").trim();
+  return msg.length > LOG_ERR_MAX ? msg.slice(0, LOG_ERR_MAX) + "…" : msg;
+}
+
 async function fetchHtmlVariants(url) {
   const attempts = [];
 
@@ -198,7 +211,7 @@ async function fetchHtmlVariants(url) {
         errors.push(`${attempt.label}:non-html:${typeof payload}`);
       }
     } catch (err) {
-      errors.push(`${attempt.label}:${err.response?.status || err.statusCode || err.code || err.message}`);
+      errors.push(`${attempt.label}:${shortErr(err)}`);
     }
   }
 
@@ -209,15 +222,42 @@ async function fetchHtmlVariants(url) {
 // ─────────────────────────────────────────────────────────────────────────────
 // CACHE
 // ─────────────────────────────────────────────────────────────────────────────
+// LRU cache berbatas BYTES (bukan jumlah item). Map mempertahankan urutan
+// insertion, jadi delete+set = MRU dan keys().next() = LRU sebenarnya.
 const cache = new Map();
+const CACHE_MAX_BYTES = Number(process.env.CACHE_MAX_BYTES || 64 * 1024 * 1024); // 64MB
+const CACHE_MAX_ITEMS = Number(process.env.CACHE_MAX_ITEMS || 800);
+let cacheBytes = 0;
+
+function estimateCacheSize(data) {
+  if (data == null) return 0;
+  if (Buffer.isBuffer(data)) return data.length + 64;
+  if (typeof data === "string") return data.length * 2 + 64;
+  try {
+    const s = JSON.stringify(data);
+    return (s ? s.length * 2 : 0) + 64;
+  } catch (_) {
+    return 1024;
+  }
+}
+
+function deleteCacheKey(key) {
+  const item = cache.get(key);
+  if (item) {
+    cacheBytes -= item.size || 0;
+    cache.delete(key);
+  }
+}
 
 function setCache(key, data, ttl = 300) {
-  cache.set(key, { data, expire: Date.now() + ttl * 1000 });
+  deleteCacheKey(key); // buang entry lama supaya urutan jadi MRU
+  const size = estimateCacheSize(data);
+  cache.set(key, { data, expire: Date.now() + ttl * 1000, size });
+  cacheBytes += size;
 
-  // Mencegah memory leak dengan membatasi ukuran cache memori maksimal 500 item
-  if (cache.size > 500) {
+  while ((cacheBytes > CACHE_MAX_BYTES || cache.size > CACHE_MAX_ITEMS) && cache.size > 0) {
     const oldestKey = cache.keys().next().value;
-    cache.delete(oldestKey);
+    deleteCacheKey(oldestKey);
   }
 }
 
@@ -225,11 +265,19 @@ function getCache(key) {
   const item = cache.get(key);
   if (!item) return null;
   if (Date.now() > item.expire) {
-    cache.delete(key);
+    deleteCacheKey(key);
     return null;
   }
   return item.data;
 }
+
+// Routine pembersihan cache kadaluwarsa setiap 5 menit (dulu tidak ada di main.js)
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, item] of cache.entries()) {
+    if (now > item.expire) deleteCacheKey(key);
+  }
+}, 5 * 60 * 1000).unref();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ANIMEID HELPERS
@@ -762,7 +810,7 @@ async function scrapeNekopoiSearch(query, page = 1, debugMode = false) {
           }
         }
       } catch (err) {
-        errors.push(err.message);
+        errors.push(shortErr(err));
       }
 
     }
@@ -818,7 +866,7 @@ async function scrapeNekopoiSearch(query, page = 1, debugMode = false) {
 
         if (items.length > 0 && parseCurrentPage($) === page) break;
       } catch (err) {
-        errors.push(err.message);
+        errors.push(shortErr(err));
       }
     }
 
@@ -1056,6 +1104,18 @@ async function fetchAnichinUrl(path) {
   }
   throw lastError;
 }
+
+// Thumbnail anichin di-scrape sebagai path relatif (mis. "/wp-content/uploads/..").
+// Kalau dibiarkan relatif, browser resolve ke origin ryukomik sendiri -> gambar pecah.
+// Helper ini mengubahnya jadi URL absolut memakai mirror yang sedang aktif.
+function absoluteAnichinUrl(src, base = activeAnichinBase) {
+  if (!src) return "";
+  const clean = String(src).trim();
+  if (!clean) return "";
+  if (/^https?:\/\//i.test(clean)) return clean;
+  if (clean.startsWith("//")) return `https:${clean}`;
+  return `${base}${clean.startsWith("/") ? "" : "/"}${clean}`;
+}
  
 // ─────────────────────────────────────────────────────────────────────────────
 // ANICHIN SCRAPER - TERBARU (Latest Release only)
@@ -1079,10 +1139,11 @@ async function scrapeAnichinTerbaru(page = 1) {
       const href = anchor.attr("href") || "";
       const slug = href.replace(/\/$/, "").split("/").filter(Boolean).pop() || "";
  
-      const thumbnail =
+      const thumbnail = absoluteAnichinUrl(
         anchor.find("img").attr("src") ||
-        anchor.find("img").attr("data-src") ||
-        "";
+          anchor.find("img").attr("data-src") ||
+          ""
+      );
  
       // Judul seri (buang h2 dari .tt)
       const title = $(el)
@@ -1155,7 +1216,7 @@ async function scrapeAnichinEpisode(slug) {
     const $ = cheerio.load(res.data);
  
     // ── THUMBNAIL ─────────────────────────────────────────────────────────
-    const thumbnail = $(".megavid .tb img").attr("src") || "";
+    const thumbnail = absoluteAnichinUrl($(".megavid .tb img").attr("src") || "");
  
     // ── JUDUL EPISODE ─────────────────────────────────────────────────────
     const episodeTitle = $("h1.entry-title").text().trim();
@@ -1267,7 +1328,7 @@ async function scrapeAnichinEpisode(slug) {
         title: $(el).find(".inf h2 a").text().trim(),
         slug: href.replace(/\/$/, "").split("/").filter(Boolean).pop(),
         url: href,
-        thumbnail: $(el).find("img").attr("src") || "",
+        thumbnail: absoluteAnichinUrl($(el).find("img").attr("src") || ""),
         postedBy: $(el).find(".inf span").eq(0).text().replace("Posted by:", "").trim(),
         releasedOn: $(el).find(".inf span").eq(1).text().replace("Released on:", "").trim(),
       });
@@ -1309,13 +1370,41 @@ async function scrapeAnichinEpisode(slug) {
   }
 }
 
+async function fetchAnichinSeriPage(slug) {
+  // Anichin mengubah pola URL seri dari /seri/<slug>/ jadi /anime/<slug>/.
+  // Path lama sekarang 301-redirect ke homepage, sehingga scrape menghasilkan DOM kosong
+  // (title/synopsis/episodeList blank) padahal success:true.
+  // Karena itu: coba /anime/ dulu, fallback ke bare slug, terakhir /seri/ lama.
+  const paths = [`/anime/${slug}/`, `/${slug}/`, `/seri/${slug}/`];
+  let lastError;
+  for (const path of paths) {
+    try {
+      const out = await fetchAnichinUrl(path);
+      const html = out.res.data;
+      // Tolak hasil yang jelas-jelas homepage (bukan halaman seri).
+      const isSeriesPage =
+        /entry-title/.test(html) && /eplister|thumbook|infox/.test(html);
+      if (!isSeriesPage) {
+        console.log(`⚠️ Anichin ${path} bukan halaman seri (redirect ke homepage?), coba path berikutnya`);
+        continue;
+      }
+      return out;
+    } catch (error) {
+      lastError = error;
+      console.log(`⚠️ Anichin seri ${path} gagal [${error.response?.status || error.code}]`);
+    }
+  }
+  if (lastError) throw lastError;
+  throw new Error(`Halaman seri anichin tidak ditemukan untuk slug: ${slug}`);
+}
+
 async function scrapeAnichinSeri(slug) {
   try {
-    const { res } = await fetchAnichinUrl(`/seri/${slug}/`);
+    const { res } = await fetchAnichinSeriPage(slug);
     const $ = cheerio.load(res.data);
  
     // ── THUMBNAIL ─────────────────────────────────────────────────────────
-    const thumbnail = $(".bigcontent .thumbook .thumb img").attr("src") || "";
+    const thumbnail = absoluteAnichinUrl($(".bigcontent .thumbook .thumb img").attr("src") || "");
  
     // ── JUDUL ─────────────────────────────────────────────────────────────
     const title = $("h1.entry-title").text().trim();
@@ -1446,10 +1535,11 @@ async function scrapeAnichinSearch(query, page = 1) {
       const href = anchor.attr("href") || "";
       const slug = href.replace(/\/$/, "").split("/").filter(Boolean).pop() || "";
 
-      const thumbnail =
+      const thumbnail = absoluteAnichinUrl(
         anchor.find("img").attr("src") ||
-        anchor.find("img").attr("data-src") ||
-        "";
+          anchor.find("img").attr("data-src") ||
+          ""
+      );
 
       // Title parsing
       const title = $(el)
@@ -1528,6 +1618,66 @@ async function scrapeAnichinSearch(query, page = 1) {
   }
 }
  
+// ── Anichin images ──────────────────────────────────────────────────────────
+// anichin.moe menolak hotlink: gambar balas 403 tanpa Referer yang benar.
+// Semua thumbnail donghua karena itu diarahkan ke proxy ini.
+function toAnichinImageUrl(url, req) {
+  if (typeof url !== "string" || !/^https?:\/\//i.test(url)) return url;
+  if (url.includes("/anichin/image?")) return url;
+  if (!/anichin\./i.test(url)) return url;
+  return `${getRequestBaseUrl(req)}/anichin/image?url=${encodeURIComponent(url)}`;
+}
+
+function rewriteAnichinImages(payload, req) {
+  if (Array.isArray(payload)) return payload.map((item) => rewriteAnichinImages(item, req));
+  if (!payload || typeof payload !== "object") return payload;
+  const out = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if ((key === "thumbnail" || key === "image" || key === "cover") && typeof value === "string") {
+      out[key] = toAnichinImageUrl(value, req);
+      continue;
+    }
+    if (value && typeof value === "object") {
+      out[key] = rewriteAnichinImages(value, req);
+      continue;
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+// Middleware harus terdaftar SEBELUM route /anichin/* supaya res.json tertimpa.
+app.use("/anichin", (req, res, next) => {
+  if (req.path.startsWith("/image")) return next();
+  const originalJson = res.json.bind(res);
+  res.json = (payload) => originalJson(rewriteAnichinImages(payload, req));
+  next();
+});
+
+app.get("/anichin/image", async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).send("url required");
+
+  try {
+    const response = await axios.get(url, {
+      responseType: "arraybuffer",
+      timeout: 15000,
+      maxRedirects: 5,
+      headers: {
+        Referer: ANICHIN_BASE_URL + "/",
+        "User-Agent": randomUA(),
+        Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+      },
+    });
+
+    res.set("Content-Type", response.headers["content-type"] || "image/webp");
+    res.set("Cache-Control", "public, max-age=604800");
+    res.send(response.data);
+  } catch (err) {
+    res.status(404).send("image not found");
+  }
+});
+
 app.get("/anichin/detail/:slug", async (req, res) => {
   const { slug } = req.params;
   if (!slug) {
@@ -1637,7 +1787,7 @@ app.get("/nekopoi/episode/:slug", async (req, res) => {
   const cached = getCache(cacheKey);
   if (cached) return res.json(cached);
   const result = await scrapeNekopoiEpisode(nekoEpisodeUrl(slug));
-  if (result.success) setCache(cacheKey, result, 60 * 60 * 24 * 7);
+  if (result.success) setCache(cacheKey, result, 60 * 60); // 1 jam (dulu 7 hari)
   res.json(result);
 });
 
@@ -1648,14 +1798,21 @@ app.get("/nekopoi/detail/:slug", async (req, res) => {
   const cached = getCache(cacheKey);
   if (cached) return res.json(cached);
   const result = await scrapeNekopoiDetail(nekoAnimeUrl(slug));
-  if (result.success) setCache(cacheKey, result, 60 * 60 * 24);
+  if (result.success) setCache(cacheKey, result, 60 * 60); // 1 jam (dulu 24 jam)
   res.json(result);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ANIMEID ROUTES
+// ANIMEID ROUTES (LEGACY)
 // ─────────────────────────────────────────────────────────────────────────────
-app.get("/animeid/terbaru", async (req, res) => {
+// Scraper animeid asli sudah MATI: upstream s13.nontonanimeid.boats membalas
+// Cloudflare Managed Challenge (403) untuk semua request non-browser, jadi
+// route ini selalu mengembalikan { success:false }.
+// Karena itu prefix /animeid/* dialihkan ke Otakudesu di otakudesu.js.
+// Route lama tetap dipasang di /animeid-old/* agar bisa dites/dibandingkan,
+// dan akan otomatis berfungsi lagi kalau upstream hidup kembali.
+// ─────────────────────────────────────────────────────────────────────────────
+app.get("/animeid-old/terbaru", async (req, res) => {
   const cached = getCache("animeid_terbaru");
   if (cached) return res.json(cached);
   const result = await scrapeNontonAnimeTerbaru();
@@ -1663,7 +1820,7 @@ app.get("/animeid/terbaru", async (req, res) => {
   res.json(result);
 });
 
-app.get("/animeid/ongoing", async (req, res) => {
+app.get("/animeid-old/ongoing", async (req, res) => {
   const cached = getCache("animeid_ongoing");
   if (cached) return res.json(cached);
   const result = await scrapeNontonAnimeOngoing();
@@ -1671,15 +1828,15 @@ app.get("/animeid/ongoing", async (req, res) => {
   res.json(result);
 });
 
-app.get("/animeid/jadwal", async (req, res) => {
+app.get("/animeid-old/jadwal", async (req, res) => {
   const cached = getCache("animeid_jadwal");
   if (cached) return res.json(cached);
   const result = await scrapeNontonAnimeJadwal();
-  if (result.success) setCache("animeid_jadwal", result, 86400);
+  if (result.success) setCache("animeid_jadwal", result, 3600); // 1 jam (dulu 24 jam)
   res.json(result);
 });
 
-app.get("/animeid/jadwal/:hari", async (req, res) => {
+app.get("/animeid-old/jadwal/:hari", async (req, res) => {
   const { hari } = req.params;
   const VALID = ["senin", "selasa", "rabu", "kamis", "jumat", "sabtu", "minggu"];
   if (!VALID.includes(hari))
@@ -1689,11 +1846,11 @@ app.get("/animeid/jadwal/:hari", async (req, res) => {
     return res.json({ success: true, hari, total: fullCached.data[hari]?.length || 0, data: fullCached.data[hari] || [] });
   const full = await scrapeNontonAnimeJadwal();
   if (!full.success) return res.json(full);
-  setCache("animeid_jadwal", full, 86400);
+  setCache("animeid_jadwal", full, 3600); // 1 jam (dulu 24 jam)
   res.json({ success: true, hari, total: full.data[hari]?.length || 0, data: full.data[hari] || [] });
 });
 
-app.get("/animeid/search", async (req, res) => {
+app.get("/animeid-old/search", async (req, res) => {
   const { q, page } = req.query;
   if (!q || q.trim().length < 2)
     return res.status(400).json({ success: false, message: "Parameter 'q' minimal 2 karakter" });
@@ -1706,7 +1863,7 @@ app.get("/animeid/search", async (req, res) => {
   res.json(result);
 });
 
-app.get("/animeid/detail/:slug", async (req, res) => {
+app.get("/animeid-old/detail/:slug", async (req, res) => {
   const { slug } = req.params;
   if (!slug) return res.status(400).json({ success: false, message: "Slug diperlukan" });
   const cacheKey = `animeid_detail_${slug}`;
@@ -1717,7 +1874,7 @@ app.get("/animeid/detail/:slug", async (req, res) => {
   res.json(result);
 });
 
-app.get("/animeid/episode/:slug", async (req, res) => {
+app.get("/animeid-old/episode/:slug", async (req, res) => {
   const { slug } = req.params;
   if (!slug) return res.status(400).json({ success: false, message: "Slug diperlukan" });
   const cacheKey = `animeid_episode_${slug}`;
@@ -2210,6 +2367,62 @@ function extractStreamInfo(unpackedJs) {
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// STREAMPOI CIRCUIT BREAKER + NEGATIVE CACHE
+// ─────────────────────────────────────────────────────────────────────────────
+// Masalah: streampoi.com mati → tiap request tunggu timeout penuh, hasil gagal
+// TIDAK di-cache, jadi request berulang terus memicu scrape baru
+// (~6000 gagal/hari, CPU & log terbakar).
+// Solusi:
+//   1) Circuit breaker — setelah N gagal berturut-turut, buka circuit → tolak
+//      cepat (tanpa timeout) selama cooldown, lalu half-open untuk cek pulih.
+//   2) Negative cache — simpan hasil gagal per-URL supaya request berulang
+//      tidak memicu scrape baru.
+const STREAMPOI_CIRCUIT_THRESHOLD = Number(process.env.STREAMPOI_CIRCUIT_THRESHOLD || 3);
+const STREAMPOI_CIRCUIT_COOLDOWN_MS = Number(process.env.STREAMPOI_CIRCUIT_COOLDOWN_MS || 10 * 60 * 1000);
+const STREAMPOI_NEGATIVE_TTL = Number(process.env.STREAMPOI_NEGATIVE_TTL || 120); // detik
+const STREAMPOI_TIMEOUT_MS = Number(process.env.STREAMPOI_TIMEOUT_MS || 10000);
+
+const streampoiCircuit = { open: false, failures: 0, openedAt: 0, totalOpened: 0, totalFastFail: 0 };
+
+function streampoiRecordSuccess() {
+  if (streampoiCircuit.failures || streampoiCircuit.open) {
+    console.log(
+      `[Streampoi] ✅ Sumber hidup lagi — circuit ditutup (gagal sebelumnya: ${streampoiCircuit.failures})`,
+    );
+  }
+  streampoiCircuit.failures = 0;
+  streampoiCircuit.open = false;
+}
+
+function streampoiRecordFailure() {
+  streampoiCircuit.failures += 1;
+  if (!streampoiCircuit.open && streampoiCircuit.failures >= STREAMPOI_CIRCUIT_THRESHOLD) {
+    streampoiCircuit.open = true;
+    streampoiCircuit.openedAt = Date.now();
+    streampoiCircuit.totalOpened += 1;
+    console.error(
+      `[Streampoi] 🔴 CIRCUIT DIBUKA setelah ${streampoiCircuit.failures} gagal berturut-turut. ` +
+        `Request ditolak cepat selama ${STREAMPOI_CIRCUIT_COOLDOWN_MS / 1000}s ` +
+        `(hemat ~${STREAMPOI_TIMEOUT_MS / 1000}s CPU per request).`,
+    );
+  }
+}
+
+// true = boleh coba resolve; false = circuit terbuka (fast-fail).
+function streampoiCircuitAllows() {
+  if (!streampoiCircuit.open) return true;
+  if (Date.now() - streampoiCircuit.openedAt < STREAMPOI_CIRCUIT_COOLDOWN_MS) {
+    streampoiCircuit.totalFastFail += 1;
+    return false;
+  }
+  // Cooldown habis → half-open: coba sekali lagi untuk deteksi sumber pulih.
+  console.log("[Streampoi] 🟡 Half-open: mencoba resolve sekali untuk cek sumber.");
+  streampoiCircuit.open = false;
+  streampoiCircuit.failures = 0;
+  return true;
+}
+
 /**
  * Resolve a streampoi.com embed URL to direct m3u8 stream info
  * @param {string} embedUrl - e.g. "https://streampoi.com/embed-xxxxx.html"
@@ -2217,34 +2430,51 @@ function extractStreamInfo(unpackedJs) {
  */
 async function resolveStreampoi(embedUrl) {
   try {
+    // Token m3u8 streampoi terikat ke User-Agent yang meminta halaman embed:
+    // UA berbeda saat mengambil playlist = 403. Simpan UA ini dan pakai ulang
+    // di stream-proxy.
+    const ua = randomUA();
     const response = await axios.get(embedUrl, {
       headers: {
-        "User-Agent": randomUA(),
+        "User-Agent": ua,
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
         Referer: "https://nekopoi.care/",
       },
-      timeout: 15000,
+      timeout: STREAMPOI_TIMEOUT_MS,
     });
 
     const html = typeof response.data === "string" ? response.data : "";
-    if (!html) return null;
+    if (!html) {
+      streampoiRecordFailure();
+      return null;
+    }
 
     const unpackedJs = extractPackedScript(html);
     if (!unpackedJs) {
       console.warn("[Streampoi] Packed script tidak ditemukan di:", embedUrl);
+      streampoiRecordFailure();
       return null;
     }
 
     const streamInfo = extractStreamInfo(unpackedJs);
     if (!streamInfo) {
       console.warn("[Streampoi] m3u8 URL tidak ditemukan di unpacked script:", embedUrl);
+      streampoiRecordFailure();
       return null;
     }
 
-    return streamInfo;
+    // Embed streampoi men-set cookie lewat JS ($.cookie(...)). Tanpa cookie ini
+    // CDN m3u8 membalas 403, jadi nilainya ikut dibawa ke proxy.
+    const cookiePairs = [...html.matchAll(/\$\.cookie\(\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]*)['"]/g)]
+      .map((m) => `${m[1]}=${m[2]}`);
+    const cookie = cookiePairs.join("; ");
+
+    streampoiRecordSuccess();
+    return { ...streamInfo, cookie, ua };
   } catch (err) {
     console.error("[Streampoi] Resolve error:", err.message);
+    streampoiRecordFailure();
     return null;
   }
 }
@@ -2270,8 +2500,32 @@ app.get("/nekopoi/resolve-streampoi", async (req, res) => {
   const cached = getCache(cacheKey);
   if (cached) return res.json(cached);
 
+  // Negative cache: hasil gagal disimpan singkat supaya request berulang
+  // (user refresh / buka ulang episode) tidak memicu scrape baru.
+  const failKey = `streampoi_fail_${url}`;
+  if (getCache(failKey)) {
+    return res.status(502).json({
+      success: false,
+      message: "Sumber streampoi sedang tidak tersedia (cache kegagalan)",
+    });
+  }
+
+  // Circuit breaker: kalau sumber sudah terbukti mati, tolak cepat tanpa
+  // menunggu timeout. Ini yang menghentikan banjir log & pemborosan CPU.
+  if (!streampoiCircuitAllows()) {
+    const sisa = Math.ceil(
+      (STREAMPOI_CIRCUIT_COOLDOWN_MS - (Date.now() - streampoiCircuit.openedAt)) / 1000,
+    );
+    return res.status(503).json({
+      success: false,
+      message: `Sumber streampoi sedang mati (circuit terbuka). Coba lagi dalam ${sisa}s.`,
+    });
+  }
+
   const streamInfo = await resolveStreampoi(url);
   if (!streamInfo) {
+    // Simpan kegagalan agar request berikutnya langsung ditolak.
+    setCache(failKey, { failed: true, at: Date.now() }, STREAMPOI_NEGATIVE_TTL);
     return res.status(502).json({
       success: false,
       message: "Gagal mengekstrak stream dari streampoi",
@@ -2280,7 +2534,10 @@ app.get("/nekopoi/resolve-streampoi", async (req, res) => {
 
   // Rewrite m3u8 URL to go through our proxy (to handle CORS)
   const baseUrl = getRequestBaseUrl(req);
-  const proxiedM3u8 = `${baseUrl}/nekopoi/stream-proxy/${encodeURIComponent(streamInfo.m3u8)}`;
+  const cookieParam = streamInfo.cookie || streamInfo.ua
+    ? `?ck=${Buffer.from(JSON.stringify({ c: streamInfo.cookie || "", u: streamInfo.ua || "" })).toString("base64url")}`
+    : "";
+  const proxiedM3u8 = `${baseUrl}/nekopoi/stream-proxy/${encodeURIComponent(streamInfo.m3u8)}${cookieParam}`;
 
   const result = {
     success: true,
@@ -2295,7 +2552,7 @@ app.get("/nekopoi/resolve-streampoi", async (req, res) => {
   };
 
   // Cache 4 jam (token biasanya valid ~9 jam berdasarkan parameter 'e' di URL)
-  setCache(cacheKey, result, 4 * 60 * 60);
+  setCache(cacheKey, result, 60 * 60); // 1 jam (dulu 4 jam)
   res.json(result);
 });
 
@@ -2309,12 +2566,34 @@ app.get("/nekopoi/stream-proxy/:encodedUrl", async (req, res) => {
   if (!encodedUrl) return res.status(400).send("URL required");
 
   const targetUrl = decodeURIComponent(encodedUrl);
+  const ck = typeof req.query.ck === "string" ? req.query.ck : "";
+  let cookie = "";
+  let pinnedUA = "";
+  try {
+    if (ck) {
+      const raw = Buffer.from(ck, "base64url").toString("utf8");
+      if (raw.startsWith("{")) {
+        const parsed = JSON.parse(raw);
+        cookie = parsed.c || "";
+        pinnedUA = parsed.u || "";
+      } else {
+        cookie = raw;
+      }
+    }
+  } catch {
+    cookie = "";
+  }
 
   try {
     const response = await axios.get(targetUrl, {
       headers: {
-        "User-Agent": randomUA(),
+        "User-Agent": pinnedUA || randomUA(),
         Referer: "https://streampoi.com/",
+        // CDN streampoi menolak (403) bila Accept-Language tidak sama dengan
+        // saat halaman embed diambil, meski token & cookie benar.
+        Accept: "*/*",
+        "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
+        ...(cookie ? { Cookie: cookie } : {}),
       },
       timeout: 15000,
       // responseType depends on content — m3u8 is text, .ts is binary
@@ -2328,8 +2607,9 @@ app.get("/nekopoi/stream-proxy/:encodedUrl", async (req, res) => {
       let playlist = response.data;
 
       // Replace absolute URLs (https://...)
+      const suffix = ck ? `?ck=${ck}` : "";
       playlist = playlist.replace(/(https?:\/\/[^\s]+)/g, (match) => {
-        return `${baseUrl}/nekopoi/stream-proxy/${encodeURIComponent(match)}`;
+        return `${baseUrl}/nekopoi/stream-proxy/${encodeURIComponent(match)}${suffix}`;
       });
 
       res.set("Content-Type", "application/vnd.apple.mpegurl");
@@ -2351,6 +2631,17 @@ app.get("/nekopoi/stream-proxy/:encodedUrl", async (req, res) => {
     res.status(502).send("Gagal mengambil stream");
   }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OTAKUDESU ROUTES (sumber: otakudesu.blog — tidak pakai Cloudflare challenge)
+// ─────────────────────────────────────────────────────────────────────────────
+require("./otakudesu")(app, { getCache, setCache });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STREAM RESOLVER (mode "ryu-lokal": ambil video mentah dari player, buang iklan)
+// Saat ini hanya filedon yang berhasil (lihat catatan di stream-resolver.js).
+// ─────────────────────────────────────────────────────────────────────────────
+require("./stream-resolver").registerRoutes(app, { getCache, setCache, getRequestBaseUrl });
 
 app.listen(3014, "0.0.0.0", () => {
   console.log("🚀 Server jalan di http://localhost:3014");
