@@ -476,6 +476,43 @@ function toKiryuuBackendImageUrl(url, req) {
   return originalUrl;
 }
 
+/**
+ * Cek cepat apakah gambar pertama chapter masih hidup di CDN sumber.
+ * Dipakai untuk menandai chapter lama Kiryuu yang asetnya sudah 403.
+ * Hanya satu permintaan HEAD (fallback GET 1 byte) per chapter, hasilnya
+ * ikut tersimpan di cache chapter 30 menit.
+ */
+async function probeKiryuuChapterImages(chapter) {
+  const images = Array.isArray(chapter?.images) ? chapter.images : [];
+  const target = images.find((img) => typeof img === "string" && /^https?:\/\//i.test(img));
+  if (!target) return { status: 0, broken: false };
+
+  const referer = KIRYUU_BASE_URL + "/";
+  try {
+    let response = await axios({
+      method: "HEAD",
+      url: target,
+      headers: kiryuuHeaders(referer),
+      timeout: 8000,
+      validateStatus: () => true,
+    });
+    if (response.status === 405 || response.status === 501) {
+      response = await axios({
+        method: "GET",
+        url: target,
+        headers: { ...kiryuuHeaders(referer), Range: "bytes=0-1023" },
+        timeout: 8000,
+        responseType: "arraybuffer",
+        validateStatus: () => true,
+      });
+    }
+    return { status: response.status, broken: response.status >= 400 };
+  } catch {
+    // Jaringan bermasalah: jangan salah tuduh sumber rusak.
+    return { status: 0, broken: false };
+  }
+}
+
 function rewriteKiryuuImages(payload, req) {
   if (Array.isArray(payload)) {
     return payload.map((item) => rewriteKiryuuImages(item, req));
@@ -4815,7 +4852,9 @@ app.get(/^\/kiryuu\/chapter\/(.+)/, async (req, res) => {
     const result = await coalescedScrape(cacheKey, async () => {
       const fullUrl = `${KIRYUU_BASE_URL}/manga/${slug}/`;
       const chapter = await scrapeKiryuuChapter(fullUrl);
-      return rewriteKiryuuImages(chapter, req);
+      const probe = await probeKiryuuChapterImages(chapter);
+      const rewritten = rewriteKiryuuImages(chapter, req);
+      return { ...rewritten, source_status: probe.status, source_broken: probe.broken };
     });
 
     if (result && result.success) {
