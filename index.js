@@ -4027,9 +4027,52 @@ app.get("/komiku/chapter/:slug", async (req, res) => {
   try {
     const result = await coalescedScrape(cacheKey, async () => {
       const fullUrl = `https://komiku.org/${slug}/`;
-      const resData = await scrapeKomikuChapter(fullUrl);
+      let resData = await scrapeKomikuChapter(fullUrl);
 
-      if (resData?.success && Array.isArray(resData.images)) {
+      // Komiku sejak Okt 2026 dilindungi Cloudflare ("Just a moment"), jadi
+      // scrape langsung sering 403. Banyak judul & slug chapter sama persis di
+      // Komikid (sumber slot 1), jadi pakai itu sebagai cadangan. Ringan: cuma
+      // satu request HTTP internal, tanpa proses/browser tambahan.
+      if (!resData?.success) {
+        try {
+          const altRes = await fetch(
+            `http://127.0.0.1:${PORT}/komikid/chapter/${encodeURIComponent(slug)}`,
+            { signal: AbortSignal.timeout(20000) },
+          );
+          const alt = await altRes.json();
+          if (alt?.success && Array.isArray(alt.images) && alt.images.length) {
+            // Komikid me-rewrite gambar ke host request-nya (127.0.0.1) karena
+            // dipanggil internal → ganti ke domain API publik.
+            const publicBase = "https://api.ryukomik.web.id";
+            const cleanNav = (value) =>
+              typeof value === "string"
+                ? value.replace(/\/?\?agc_[a-z]+=1$/i, "").replace(/\/+$/, "")
+                : value;
+            resData = {
+              ...alt,
+              images: alt.images.map((url) =>
+                String(url).replace(/^https?:\/\/127\.0\.0\.1:\d+/i, publicBase),
+              ),
+              prev: cleanNav(alt.prev),
+              next: cleanNav(alt.next),
+              fallback_source: "komikid",
+              source_broken: false,
+              message: "Gambar dari sumber cadangan (Komikid).",
+            };
+            vlog(`↩️ [Komiku→Komikid] ${slug}`);
+          }
+        } catch (fallbackError) {
+          vlog(`⚠️ Fallback komikid gagal untuk ${slug}: ${fallbackError.message}`);
+        }
+      }
+
+      // Gambar hasil fallback Komikid sudah lewat proxy /komikid/image —
+      // jangan dibungkus lagi dengan /komiku/image (double proxy = CPU & RAM).
+      if (
+        resData?.success &&
+        Array.isArray(resData.images) &&
+        resData.fallback_source !== "komikid"
+      ) {
         resData.images = resData.images
           .filter(Boolean)
           .map((imageUrl) => toKomikuWorkerImageUrl(imageUrl, req));
