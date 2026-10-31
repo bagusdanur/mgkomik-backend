@@ -4081,7 +4081,8 @@ app.get("/komiku/chapter/:slug", async (req, res) => {
     });
 
     if (result && result.success) {
-      setCache(cacheKey, result, 1800); // 30 menit (dulu 2 jam)
+      const ttl = result.fallback_source === "komikid" ? 6 * 3600 : 1800;
+      setCache(cacheKey, result, ttl);
     }
     res.json(result);
   } catch (err) {
