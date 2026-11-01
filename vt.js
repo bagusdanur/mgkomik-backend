@@ -1,7 +1,7 @@
 "use strict";
 
 /**
- * Scraper VoraToon (https://v9.voratoon.com).
+ * Scraper sumber vt (https://v9.voratoon.com).
  *
  * Situsnya Next.js dengan HTML server-rendered, jadi semua data diambil dari
  * HTML publik — tidak menyentuh /api/ (dilarang robots.txt). Gambar chapter
@@ -26,7 +26,7 @@ function absolute(req, pathValue) {
 }
 
 function vlog(...args) {
-  console.log("[VoraToon]", ...args);
+  console.log("[VT]", ...args);
 }
 
 async function fetchHtml(url) {
@@ -58,7 +58,7 @@ function coverProxyUrl(rawSrc) {
   // Cover asli berupa /api/cover?src=<signed cvr.voratoon.id>. Simpan URL
   // absolutnya lalu diteruskan lewat proxy kita sendiri.
   const absolute = rawSrc.startsWith("http") ? rawSrc : `${BASE}${rawSrc}`;
-  return `/voratoon/image?url=${encodeURIComponent(absolute)}`;
+  return `/vt/image?url=${encodeURIComponent(absolute)}`;
 }
 
 function parseChaptersFromEmbedded(html, slug) {
@@ -121,7 +121,7 @@ function parseUpdatesPage(html) {
 
     seen.add(slug);
     items.push({
-      source: "voratoon",
+      source: "vt",
       title,
       slug,
       image: imgSrc.startsWith("data:") ? "" : coverProxyUrl(imgSrc),
@@ -141,10 +141,10 @@ function parseUpdatesPage(html) {
 }
 
 function registerVoratoonRoutes(app, { getCache, setCache, coalescedScrape }) {
-  app.get("/voratoon/pustaka", async (req, res) => {
+  app.get("/vt/pustaka", async (req, res) => {
     try {
       const page = Math.max(1, parseInt(req.query.page) || 1);
-      const cacheKey = `voratoon:pustaka:${page}`;
+      const cacheKey = `vt:pustaka:${page}`;
       const cached = getCache(cacheKey);
       if (cached) return res.json(cached);
 
@@ -153,7 +153,7 @@ function registerVoratoonRoutes(app, { getCache, setCache, coalescedScrape }) {
         const data = parseUpdatesPage(html).map((item) => ({ ...item, image: absolute(req, item.image) }));
         return {
           success: true,
-          source: "voratoon",
+          source: "vt",
           page,
           total: data.length,
           meta: { currentPage: page, totalPages: page + 1, totalItems: data.length },
@@ -163,17 +163,17 @@ function registerVoratoonRoutes(app, { getCache, setCache, coalescedScrape }) {
       if (payload?.success && payload.data?.length) setCache(cacheKey, payload, 300);
       res.json(payload);
     } catch (error) {
-      console.error("❌ Voratoon pustaka:", error.message);
+      console.error("❌ VT pustaka:", error.message);
       res.status(500).json({ success: false, message: error.message });
     }
   });
 
-  app.get("/voratoon/detail/:slug", async (req, res) => {
+  app.get("/vt/detail/:slug", async (req, res) => {
     try {
       const slug = String(req.params.slug || "").slice(0, 200);
       if (!/^[a-z0-9-]+$/i.test(slug)) return res.status(400).json({ success: false, message: "slug tidak valid" });
 
-      const cacheKey = `voratoon:detail:${slug}`;
+      const cacheKey = `vt:detail:${slug}`;
       const cached = getCache(cacheKey);
       if (cached) return res.json(cached);
 
@@ -210,18 +210,18 @@ function registerVoratoonRoutes(app, { getCache, setCache, coalescedScrape }) {
       if (payload?.success) setCache(cacheKey, payload, 600);
       res.json(payload);
     } catch (error) {
-      console.error("❌ Voratoon detail:", error.message);
+      console.error("❌ VT detail:", error.message);
       res.status(500).json({ success: false, message: error.message });
     }
   });
 
-  app.get(/^\/voratoon\/chapter\/(.+)/, async (req, res) => {
+  app.get(/^\/vt\/chapter\/(.+)/, async (req, res) => {
     try {
       const raw = String(req.params[0] || "");
       const match = raw.match(/^([a-z0-9-]+)\/chapter\/(\d+(?:\.\d+)?)$/i);
       if (!match) return res.status(400).json({ success: false, message: "slug chapter tidak valid" });
       const [, seriesSlug, chapterNumber] = match;
-      const cacheKey = `voratoon:chapter:${seriesSlug}:${chapterNumber}`;
+      const cacheKey = `vt:chapter:${seriesSlug}:${chapterNumber}`;
       const cached = getCache(cacheKey);
       if (cached) return res.json(cached);
 
@@ -236,7 +236,7 @@ function registerVoratoonRoutes(app, { getCache, setCache, coalescedScrape }) {
           if (!/\.(jpg|jpeg|png|webp)$/i.test(src)) return;
           if (seen.has(src)) return;
           seen.add(src);
-          images.push(absolute(req, `/voratoon/image?url=${encodeURIComponent(src)}`));
+          images.push(absolute(req, `/vt/image?url=${encodeURIComponent(src)}`));
         });
 
         const chapterNum = Number(chapterNumber);
@@ -255,12 +255,12 @@ function registerVoratoonRoutes(app, { getCache, setCache, coalescedScrape }) {
       if (payload?.success) setCache(cacheKey, payload, 7200);
       res.json(payload);
     } catch (error) {
-      console.error("❌ Voratoon chapter:", error.message);
+      console.error("❌ VT chapter:", error.message);
       res.status(500).json({ success: false, message: error.message });
     }
   });
 
-  app.get("/voratoon/image", async (req, res) => {
+  app.get("/vt/image", async (req, res) => {
     try {
       const target = String(req.query.url || "");
       let host = "";
@@ -290,17 +290,17 @@ function registerVoratoonRoutes(app, { getCache, setCache, coalescedScrape }) {
     }
   });
 
-  app.get("/voratoon/search", (req, res) => {
+  app.get("/vt/search", (req, res) => {
     // Pencarian VoraToon berjalan di sisi klien lewat /api (dilarang robots),
     // jadi endpoint ini sengaja kosong sampai ada jalur HTML yang tersedia.
     res.json({ success: true, data: [] });
   });
 
-  app.get("/voratoon/filters", (req, res) => {
+  app.get("/vt/filters", (req, res) => {
     res.json({ success: true, data: { genres: [], status: [], type: [] } });
   });
 
-  vlog("routes registered: /voratoon/pustaka, /voratoon/detail/:slug, /voratoon/chapter/*, /voratoon/image");
+  vlog("routes registered: /vt/pustaka, /vt/detail/:slug, /vt/chapter/*, /vt/image");
 }
 
 module.exports = registerVoratoonRoutes;
