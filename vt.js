@@ -59,6 +59,20 @@ function decodeEntities(value = "") {
     .trim();
 }
 
+function relativeTimeId(text = "") {
+  const m = String(text).match(/(\d+)\s*(minute|hour|day|week|month|year)s?/i);
+  if (!m) return "";
+  const map = {
+    minute: "menit",
+    hour: "jam",
+    day: "hari",
+    week: "minggu",
+    month: "bulan",
+    year: "tahun",
+  };
+  return `${m[1]} ${map[m[2].toLowerCase()]} lalu`;
+}
+
 function coverProxyUrl(rawSrc) {
   if (!rawSrc) return "";
   // Cover asli berupa /api/cover?src=<signed>. Simpan URL
@@ -124,6 +138,7 @@ function parseUpdatesPage(html) {
       if (Number.isFinite(num)) chapterLinks.push(num);
     });
     const latest = chapterLinks.length ? Math.max(...chapterLinks) : null;
+    const timeText = $article.find('[class*="time"]').first().text().trim() || $article.text();
 
     seen.add(slug);
     items.push({
@@ -134,7 +149,7 @@ function parseUpdatesPage(html) {
       detail_link: `${BASE}/series/${slug}`,
       description: "",
       type_genre: "",
-      info: "",
+      info: relativeTimeId(timeText),
       chapter_awal: "",
       chapter_terbaru: latest !== null ? `Chapter ${latest}` : "",
       // `chapters` sengaja kosong: kartu listing sudah menampilkan
