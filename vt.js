@@ -179,7 +179,52 @@ function parseUpdatesPage(html) {
   return items;
 }
 
-function registerVoratoonRoutes(app, { getCache, setCache, coalescedScrape }) {
+function slugifyGenre(label = "") {
+  return String(label)
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function parseBrowseCards(html, req) {
+  const $ = cheerio.load(html);
+  const items = [];
+  const seen = new Set();
+
+  $("article").each((_, article) => {
+    const $article = $(article);
+    const $link = $article.find('a[href^="/series/"]').first();
+    const href = $link.attr("href") || "";
+    const m = href.match(/^\/series\/([a-z0-9-]+)\/?$/i);
+    if (!m) return;
+    const slug = m[1];
+    if (seen.has(slug)) return;
+
+    const $img = $article.find("img").first();
+    const title = decodeEntities($img.attr("alt") || $link.attr("aria-label") || slug.replace(/-/g, " "));
+    const chapterText = $article.text().match(/Chapter\s*(\d+(?:\.\d+)?)/i);
+
+    seen.add(slug);
+    items.push({
+      source: "vt",
+      title,
+      slug,
+      image: absolute(req, coverProxyUrl($img.attr("src") || "")),
+      detail_link: `${BASE}/series/${slug}`,
+      description: "",
+      type_genre: "",
+      info: "",
+      chapter_awal: "",
+      chapter_terbaru: chapterText ? `Chapter ${chapterText[1]}` : "",
+      chapters: [],
+    });
+  });
+
+  return items;
+}
+
+function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
   app.get("/vt/pustaka", async (req, res) => {
     try {
       const page = Math.max(1, parseInt(req.query.page) || 1);
@@ -329,17 +374,144 @@ function registerVoratoonRoutes(app, { getCache, setCache, coalescedScrape }) {
     }
   });
 
-  app.get("/vt/search", (req, res) => {
-    // Pencarian VoraToon berjalan di sisi klien lewat /api (dilarang robots),
-    // jadi endpoint ini sengaja kosong sampai ada jalur HTML yang tersedia.
-    res.json({ success: true, data: [] });
+  app.get("/vt/search", async (req, res) => {
+    try {
+      const query = String(req.query.q || "").trim().slice(0, 80);
+      if (!query) return res.json({ success: true, data: [] });
+
+      const cacheKey = `vt:search:${query.toLowerCase()}`;
+      const cached = getCache(cacheKey);
+      if (cached) return res.json(cached);
+
+      const payload = await coalescedScrape(cacheKey, async () => {
+        // Halaman /browse menerima ?q= dan sudah memfilter di server.
+        const html = await fetchHtml(`${BASE}/browse?q=${encodeURIComponent(query)}`);
+        const $ = cheerio.load(html);
+        const items = [];
+        const seen = new Set();
+        const needle = query.toLowerCase();
+
+        $('a[href^="/series/"]').each((_, el) => {
+          const href = $(el).attr("href") || "";
+          const m = href.match(/^\/series\/([a-z0-9-]+)\/?$/i);
+          if (!m) return;
+          const slug = m[1];
+          if (seen.has(slug)) return;
+          const $img = $(el).find("img").first();
+          const title = decodeEntities(
+            ($img.attr("alt") || "").replace(/^Cover\s+/i, "") || $(el).text().trim() || slug.replace(/-/g, " "),
+          );
+          if (needle && !title.toLowerCase().includes(needle) && !slug.includes(needle)) return;
+          seen.add(slug);
+          items.push({
+            source: "vt",
+            title,
+            slug,
+            image: absolute(req, coverProxyUrl($img.attr("src") || "")),
+            chapter_terbaru: "",
+            info: "",
+          });
+        });
+
+        return { success: true, source: "vt", query, total: items.length, data: items };
+      });
+
+      if (payload?.success) setCache(cacheKey, payload, 600);
+      res.json(payload);
+    } catch (error) {
+      console.error("❌ VT search:", error.message);
+      res.status(500).json({ success: false, message: error.message });
+    }
   });
 
-  app.get("/vt/filters", (req, res) => {
-    res.json({ success: true, data: { genres: [], status: [], type: [] } });
+  app.get("/vt/pustaka-filter", async (req, res) => {
+    try {
+      const page = Math.max(1, parseInt(req.query.page) || 1);
+      const genre = String(req.query.genre || "").trim();
+      const genre2 = String(req.query.genre2 || "").trim();
+      const status = String(req.query.status || "").trim();
+      const tipe = String(req.query.tipe || "").trim();
+      const orderby = String(req.query.orderby || "").trim();
+
+      const cacheKey = `vt:filter:${page}:${genre}:${genre2}:${status}:${tipe}:${orderby}`;
+      const cached = getCache(cacheKey);
+      if (cached) return res.json(cached);
+
+      const params = new URLSearchParams();
+      params.set("page", String(page));
+      if (genre) params.set("genre", genre);
+      if (genre2 && genre2 !== genre) params.append("genre", genre2);
+      if (status) params.set("status", status);
+      if (tipe) params.set("format", tipe);
+      // Situs hanya mengenal sort=popular; selain itu urut default.
+      if (orderby === "popular") params.set("sort", "popular");
+
+      const payload = await coalescedScrape(cacheKey, async () => {
+        const html = await fetchHtml(`${BASE}/browse?${params.toString()}`);
+        const data = parseBrowseCards(html, req);
+        return {
+          success: true,
+          source: "vt",
+          page,
+          total: data.length,
+          meta: { currentPage: page, totalPages: page + 1, totalItems: data.length },
+          data,
+        };
+      });
+      if (payload?.success && payload.data?.length) setCache(cacheKey, payload, 300);
+      res.json(payload);
+    } catch (error) {
+      console.error("❌ VT filter:", error.message);
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  app.get("/vt/filters", async (req, res) => {
+    try {
+      const cacheKey = "vt:filters";
+      const cached = getCache(cacheKey);
+      if (cached) return res.json(cached);
+
+      const payload = await coalescedScrape(cacheKey, async () => {
+        const html = await fetchHtml(`${BASE}/browse`);
+        const $ = cheerio.load(html);
+        const genres = [];
+        const seen = new Set();
+        $(".genre-box").each((_, el) => {
+          const label = decodeEntities($(el).text() || "");
+          const value = slugifyGenre(label);
+          if (!label || !value || seen.has(value)) return;
+          seen.add(value);
+          genres.push({ value, label });
+        });
+        genres.sort((a, b) => a.label.localeCompare(b.label));
+
+        return {
+          success: true,
+          data: {
+            tipe: [
+              { value: "manhwa", label: "Manhwa" },
+              { value: "manga", label: "Manga" },
+              { value: "manhua", label: "Manhua" },
+            ],
+            status: [
+              { value: "ongoing", label: "Ongoing" },
+              { value: "completed", label: "Completed" },
+              { value: "hiatus", label: "Hiatus" },
+            ],
+            genre: genres,
+          },
+        };
+      });
+      if (payload?.success) setCache(cacheKey, payload, 6 * 3600);
+      res.json(payload);
+    } catch (error) {
+      console.error("❌ VT filters:", error.message);
+      res.status(500).json({ success: false, data: { tipe: [], status: [], genre: [] } });
+    }
   });
 
   vlog("routes registered: /vt/pustaka, /vt/detail/:slug, /vt/chapter/*, /vt/image");
 }
 
-module.exports = registerVoratoonRoutes;
+module.exports = registerVtRoutes;
