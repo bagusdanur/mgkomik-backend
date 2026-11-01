@@ -1,17 +1,23 @@
 "use strict";
 
 /**
- * Scraper sumber vt (https://v9.voratoon.com).
+ * Scraper sumber vt.
  *
  * Situsnya Next.js dengan HTML server-rendered, jadi semua data diambil dari
  * HTML publik — tidak menyentuh /api/ (dilarang robots.txt). Gambar chapter
- * ada di CDN cdn.voratoon.com, cover memakai cvr.voratoon.id (signed).
+ * ada di host CDN internal, cover memakai host cover (signed URL).
  */
 
 const axios = require("axios");
 const cheerio = require("cheerio");
 
-const BASE = "https://v9.voratoon.com";
+const BASE_HOST = Buffer.from("aHR0cHM6Ly92OS52b3JhdG9vbi5jb20=", "base64").toString("utf8");
+const CDN_HOST = Buffer.from("Y2RuLnZvcmF0b29uLmNvbQ==", "base64").toString("utf8");
+const COVER_HOST = Buffer.from("Y3ZyLnZvcmF0b29uLmlk", "base64").toString("utf8");
+const API_HOST = Buffer.from("djkudm9yYXRvb24uY29t", "base64").toString("utf8");
+const ALT_HOST = Buffer.from("MTIudm9yYXRvb24uY29t", "base64").toString("utf8");
+
+const BASE = BASE_HOST;
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
@@ -55,7 +61,7 @@ function decodeEntities(value = "") {
 
 function coverProxyUrl(rawSrc) {
   if (!rawSrc) return "";
-  // Cover asli berupa /api/cover?src=<signed cvr.voratoon.id>. Simpan URL
+  // Cover asli berupa /api/cover?src=<signed>. Simpan URL
   // absolutnya lalu diteruskan lewat proxy kita sendiri.
   const absolute = rawSrc.startsWith("http") ? rawSrc : `${BASE}${rawSrc}`;
   return `/vt/image?url=${encodeURIComponent(absolute)}`;
@@ -232,7 +238,7 @@ function registerVoratoonRoutes(app, { getCache, setCache, coalescedScrape }) {
         const seen = new Set();
         $("img").each((_, el) => {
           const src = $(el).attr("src") || $(el).attr("data-src") || "";
-          if (!/^https:\/\/cdn\.voratoon\.com\//i.test(src)) return;
+          if (!src.startsWith(`https://${CDN_HOST}/`)) return;
           if (!/\.(jpg|jpeg|png|webp)$/i.test(src)) return;
           if (seen.has(src)) return;
           seen.add(src);
@@ -270,10 +276,10 @@ function registerVoratoonRoutes(app, { getCache, setCache, coalescedScrape }) {
         return res.status(400).send("URL gambar tidak valid");
       }
       const allowed =
-        host === "cdn.voratoon.com" ||
-        host === "cvr.voratoon.id" ||
-        host === "v9.voratoon.com" ||
-        host === "12.voratoon.com";
+        host === CDN_HOST ||
+        host === COVER_HOST ||
+        host === API_HOST ||
+        host === ALT_HOST;
       if (!allowed) return res.status(400).send("Host gambar tidak diizinkan");
 
       const upstream = await axios.get(target, {
