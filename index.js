@@ -4009,6 +4009,69 @@ app.get("/komiku/detail/:slug", async (req, res) => {
 });
 
 // === Route: Chapter ===
+// ── Fallback Komiku via komiku.online ────────────────
+// komiku.org diblokir Cloudflare untuk IP server ini, tapi komiku.online
+// menyajikan katalog yang sama dengan URL /baca/<slug>/ dan gambar di
+// manga.gogoanime.fit. Dipakai sebelum fallback ke Komikid.
+async function scrapeKomikuOnlineChapter(slug) {
+  const url = `https://www.komiku.online/baca/${encodeURIComponent(slug)}/`;
+  try {
+    const { data } = await axios.get(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml",
+        "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
+      },
+      timeout: 20000,
+      maxContentLength: 25 * 1024 * 1024,
+    });
+    if (typeof data !== "string" || data.length < 5000) return null;
+    if (/Halaman tidak ditemukan/i.test(data)) return null;
+
+    const seen = new Set();
+    const images = [];
+    const matches = data.match(/https:\/\/[^"'\s\\]+\.(?:jpg|jpeg|png|webp)/gi) || [];
+    for (const raw of matches) {
+      const image = raw.replace(/&amp;/g, "&");
+      if (seen.has(image)) continue;
+      // Hanya gambar chapter (…/<chapter>/001.jpg), bukan poster/ads.
+      if (!/\/\d+\.(?:jpg|jpeg|png|webp)$/i.test(image)) continue;
+      if (/thumbnail|poster|ads|logo|favicon/i.test(image)) continue;
+      seen.add(image);
+      images.push(image);
+    }
+    if (images.length < 2) return null;
+
+    const mangaId = slug.replace(/-chapter-[\d.]+$/i, "");
+    const chapterMatch = slug.match(/-chapter-([\d.]+)$/i);
+    const chapterLabel = chapterMatch ? `Chapter ${chapterMatch[1]}` : "Chapter";
+
+    // Navigasi: cari link chapter sebelumnya/berikutnya di halaman.
+    const prevMatch = data.match(new RegExp(`/baca/${mangaId}-chapter-([\\d.]+)/`, "g")) || [];
+    const numbers = [...new Set(prevMatch.map((link) => link.match(/-chapter-([\d.]+)\//)?.[1]).filter(Boolean))];
+    const current = chapterMatch ? Number(chapterMatch[1]) : null;
+    const numeric = numbers.map(Number).sort((a, b) => a - b);
+    const prevNum = current !== null ? [...numeric].reverse().find((n) => n < current) : undefined;
+    const nextNum = current !== null ? numeric.find((n) => n > current) : undefined;
+
+    return {
+      success: true,
+      mangaId,
+      chapterSlug: slug,
+      currentChapter: chapterLabel,
+      images,
+      prev: prevNum !== undefined ? `${mangaId}-chapter-${prevNum}` : null,
+      next: nextNum !== undefined ? `${mangaId}-chapter-${nextNum}` : null,
+      fallback_source: "komiku.online",
+      source_broken: false,
+      message: "Gambar dari sumber cadangan (Komiku Online).",
+    };
+  } catch (error) {
+    vlog(`[Komiku] fallback komiku.online gagal untuk ${slug}: ${error.message}`);
+    return null;
+  }
+}
+
 app.get("/komiku/chapter/:slug", async (req, res) => {
   const { slug } = req.params;
   if (!slug) {
@@ -4033,6 +4096,11 @@ app.get("/komiku/chapter/:slug", async (req, res) => {
       // scrape langsung sering 403. Banyak judul & slug chapter sama persis di
       // Komikid (sumber slot 1), jadi pakai itu sebagai cadangan. Ringan: cuma
       // satu request HTTP internal, tanpa proses/browser tambahan.
+      if (!resData?.success) {
+        const online = await scrapeKomikuOnlineChapter(slug);
+        if (online?.success) resData = online;
+      }
+
       if (!resData?.success) {
         try {
           const altRes = await fetch(
@@ -4583,6 +4651,7 @@ const ALLOWED_KOMIKU_HOSTS = new Set([
   "komiku.to",
   "www.komiku.to",
   "image1.komiku.to",
+  "manga.gogoanime.fit",
 ]);
 
 function isAllowedKomikuImageUrl(url) {

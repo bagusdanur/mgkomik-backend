@@ -92,6 +92,47 @@ function isCloudflareChallenge(html = "") {
   return false;
 }
 
+async function fetchViaProxies(fullUrl, timeout) {
+  const attempts = [];
+
+  const WORKER_PROXY = process.env.KOMIKINDO_PROXY_URL || "https://proxy.kopipaitboskuh.workers.dev/";
+  if (WORKER_PROXY) {
+    try {
+      const separator = WORKER_PROXY.endsWith("=") ? "" : (WORKER_PROXY.includes("?") ? "&url=" : "?url=");
+      const workerUrl = `${WORKER_PROXY}${separator}${encodeURIComponent(fullUrl)}&referer=${encodeURIComponent(BASE_URL + "/")}`;
+      const { data } = await axios.get(workerUrl, { timeout: Math.max(timeout, 15000), maxContentLength: 25 * 1024 * 1024 });
+      if (typeof data === "string" && data.length > 2000 && !isCloudflareChallenge(data) && /ManhwaIndo|manhwaindo/i.test(data)) {
+        vlog(`[Komikindo] ✅ Worker proxy berhasil untuk ${fullUrl}`);
+        return data;
+      }
+      attempts.push("worker:kualitas-data");
+    } catch (err) {
+      attempts.push(`worker:${err.response?.status || err.code || shortErrMsg(err)}`);
+    }
+  }
+
+  const CORS_PROXY = process.env.KOMIKINDO_CORS_PROXY || "https://api.cors.lol/?url=";
+  if (CORS_PROXY) {
+    try {
+      const { data } = await axios.get(`${CORS_PROXY}${encodeURIComponent(fullUrl)}`, {
+        timeout: Math.max(timeout, 15000),
+        headers: { Accept: "text/html,application/xhtml+xml" },
+        maxContentLength: 25 * 1024 * 1024,
+      });
+      if (typeof data === "string" && data.length > 2000 && !isCloudflareChallenge(data) && /ManhwaIndo|manhwaindo/i.test(data)) {
+        vlog(`[Komikindo] ✅ Proxy CORS berhasil untuk ${fullUrl}`);
+        return data;
+      }
+      attempts.push("corsproxy:kualitas-data");
+    } catch (err) {
+      attempts.push(`corsproxy:${err.response?.status || err.code || shortErrMsg(err)}`);
+    }
+  }
+
+  if (attempts.length) console.warn(`[Komikindo] ⚠️ Proxy gagal untuk ${fullUrl}: ${attempts.join(" -> ")}`);
+  return null;
+}
+
 async function customFetch(url, options = {}) {
   const fullUrl = url.startsWith("http") ? url : `${BASE_URL}${url}`;
   const reqHeaders = headers(options.referer || BASE_URL + "/");
@@ -105,6 +146,13 @@ async function customFetch(url, options = {}) {
   // per request. Langsung tolak cepat sampai masa cooldown habis.
   if (circuit.open) {
     if (Date.now() - circuit.openedAt < CIRCUIT_COOLDOWN_MS) {
+      // Direct/cloudscraper dilewati, TAPI proxy tetap dicoba: proxy memakai IP
+      // lain sehingga blokir IP server tidak berlaku.
+      const proxied = await fetchViaProxies(fullUrl, timeout);
+      if (proxied) {
+        recordFetchSuccess();
+        return proxied;
+      }
       throw new Error(`Komikindo circuit terbuka (sumber mati). Coba lagi dalam ${Math.ceil((CIRCUIT_COOLDOWN_MS - (Date.now() - circuit.openedAt)) / 1000)}s`);
     }
     // cooldown habis → coba sekali lagi (half-open), reset setengah
@@ -137,49 +185,11 @@ async function customFetch(url, options = {}) {
     errors.push(`cloudscraper:${err.response?.status || err.code || shortErrMsg(err)}`);
   }
 
-  // Strategi 3: Worker proxy
-  const WORKER_PROXY = process.env.KOMIKINDO_PROXY_URL || "https://proxy.kopipaitboskuh.workers.dev/";
-  if (WORKER_PROXY) {
-    try {
-      const separator = WORKER_PROXY.endsWith("=") ? "" : (WORKER_PROXY.includes("?") ? "&url=" : "?url=");
-      const workerUrl = `${WORKER_PROXY}${separator}${encodeURIComponent(fullUrl)}&referer=${encodeURIComponent(BASE_URL + "/")}`;
-      const { data } = await axios.get(workerUrl, { timeout });
-      if (typeof data === "string" && !isCloudflareChallenge(data)) {
-        vlog(`[Komikindo] ✅ Worker proxy berhasil untuk ${fullUrl}`);
-        recordFetchSuccess();
-        return data;
-      }
-      errors.push("worker:cloudflare-challenge");
-    } catch (err) {
-      errors.push(`worker:${err.response?.status || err.code || err.message}`);
-    }
-  }
-
-  // Strategi 4: proxy CORS publik (IP berbeda). Dipakai saat semua jalur di
-  // atas gagal karena situs memblokir IP server ini ("Akses dibatasi" 403).
-  const CORS_PROXY = process.env.KOMIKINDO_CORS_PROXY || "https://api.cors.lol/?url=";
-  if (CORS_PROXY) {
-    try {
-      const proxied = `${CORS_PROXY}${encodeURIComponent(fullUrl)}`;
-      const { data } = await axios.get(proxied, {
-        timeout: Math.max(timeout, 15000),
-        headers: { Accept: "text/html,application/xhtml+xml" },
-        maxContentLength: 20 * 1024 * 1024,
-      });
-      if (
-        typeof data === "string" &&
-        data.length > 5000 &&
-        /ManhwaIndo|manhwaindo/i.test(data) &&
-        !isCloudflareChallenge(data)
-      ) {
-        vlog(`[Komikindo] ✅ Proxy CORS berhasil untuk ${fullUrl}`);
-        recordFetchSuccess();
-        return data;
-      }
-      errors.push("corsproxy:kualitas-data");
-    } catch (err) {
-      errors.push(`corsproxy:${err.response?.status || err.code || shortErrMsg(err)}`);
-    }
+  // Strategi 3: proxy (Worker + CORS publik)
+  const proxiedHtml = await fetchViaProxies(fullUrl, timeout);
+  if (proxiedHtml) {
+    recordFetchSuccess();
+    return proxiedHtml;
   }
 
   // ── 404 / error klien TIDAK boleh membuka circuit ──
