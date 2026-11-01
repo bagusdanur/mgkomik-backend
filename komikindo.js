@@ -421,18 +421,96 @@ async function fetchAgcChapters(html, vlog) {
 //                            + ul > li > a (chapter) + span (waktu)
 function parseSeriesCards($, scope, { withChapters = true } = {}) {
   const out = [];
-  scope.find("a.series[href]").each((_, a) => {
-    const $a = $(a);
-    const link = $a.attr("href") || "";
-    const title = ($a.attr("title") || $a.text() || "").trim();
+
+  const push = ({ link, title, image, chapterLabel, typeLabel, time, chapters, description }) => {
     if (!link || !title) return;
     if (!/\/series\//.test(link)) return;
     if (out.some((o) => o.detail_link === link)) return;
+    const slug = extractSlugFromUrl(link);
+    out.push({
+      source: "komikindo",
+      title,
+      slug,
+      image: image || "",
+      detail_link: link,
+      description: description || "",
+      type_genre: typeLabel || "",
+      info: time || "",
+      chapter_awal: chapters && chapters.length ? chapters[chapters.length - 1].title : chapterLabel || "",
+      chapter_terbaru: chapterLabel || (chapters && chapters.length ? chapters[0].title : ""),
+      chapters: chapters || [],
+    });
+  };
 
+  // ── Markup baru: <a class="bm-card series"> di dalam <li class="bm-card-wrap">
+  scope.find("a.bm-card.series[href], a.bm-card[href]").each((_, a) => {
+    const $a = $(a);
+    const link = $a.attr("href") || "";
+    const title = ($a.find(".bm-card__title").first().text() || $a.attr("title") || "").trim();
+    const imgEl = $a.find("img").first();
+    let image = imgEl.attr("src") || imgEl.attr("data-src") || imgEl.attr("data-lazy-src") || "";
+    if (image.startsWith("data:image")) image = "";
+    // Badge kiri-atas bisa berisi "Ch. 80" sekaligus "1 minute lalu" —
+    // pisahkan supaya kartu menampilkan chapter saja.
+    const badgeText = $a.find(".bm-cover__tl").first().text().trim().replace(/\s+/g, " ");
+    const chapterLabel = (badgeText.match(/Ch\.\s*[\d.]+/i) || [""])[0].trim();
+    const timeLabel = (badgeText.match(/\d+\s*(?:menit|jam|hari|minggu|bulan|tahun)\s*lalu/i) || [""])[0].trim();
+    const typeText = $a.find(".bm-cover__br").first().text().trim();
+    const typeFromClass = ($a.find(".bm-cover__br").attr("class") || "").match(/bm-badge--(manhwa|manga|manhua)/i)?.[1] || "";
+    const typeLabel = typeText || (typeFromClass ? typeFromClass[0].toUpperCase() + typeFromClass.slice(1).toLowerCase() : "");
+    push({ link, title, image, chapterLabel, typeLabel, time: timeLabel });
+  });
+
+  // ── Markup baru versi baris: <div class="bm-row"> … bm-row__title + .bm-ch
+  scope.find(".bm-row").each((_, row) => {
+    const $row = $(row);
+    const $link = $row.find('a[href*="/series/"]').first();
+    const link = $link.attr("href") || "";
+    const title = ($row.find(".bm-row__title").first().text() || $link.attr("title") || "").trim();
+    const $img = $row.find(".bm-row__cover img, img").first();
+    let image = $img.attr("src") || $img.attr("data-src") || "";
+    if (image.startsWith("data:image")) image = "";
+
+    const chapters = [];
+    if (withChapters) {
+      $row.find(".bm-ch").each((__, el) => {
+        const $ch = $(el);
+        const href = $ch.attr("href") || $ch.find("a").attr("href") || "";
+        // Markup: <a class="bm-ch"><span>Ch. 23</span><small>10 minutes lalu</small></a>
+        const chTitle = $ch.find("span").first().text().trim() || $ch.text().trim().replace(/\s+/g, " ");
+        const chTime = $ch.find("small").first().text().trim();
+        if (!href || !chTitle) return;
+        chapters.push({ title: chTitle, link: href, time: translateTime(chTime), locked: false });
+      });
+    }
+
+    const rowType =
+      ($row.find(".bm-badge--manhwa, .bm-badge--manga, .bm-badge--manhua").attr("class") || "").match(
+        /bm-badge--(manhwa|manga|manhua)/i,
+      )?.[1] || "";
+
+    push({
+      link,
+      title,
+      image,
+      chapterLabel: chapters[0]?.title || "",
+      typeLabel: rowType ? rowType[0].toUpperCase() + rowType.slice(1).toLowerCase() : "",
+      time: chapters[0]?.time || "",
+      chapters,
+    });
+  });
+
+  // ── Markup lama (tetap didukung): a.series di div.flex.gap-4 + ul li
+  scope.find("a.series[href]").each((_, a) => {
+    const $a = $(a);
+    const link = $a.attr("href") || "";
+    if (!/\/series\//.test(link)) return;
+    if (out.some((o) => o.detail_link === link)) return;
+
+    const title = ($a.attr("title") || $a.text() || "").trim();
     const card = $a.closest("div.flex.gap-4");
     const imgEl = $a.find("img").first();
-    let image =
-      imgEl.attr("src") || imgEl.attr("data-src") || imgEl.attr("data-lazy-src") || "";
+    let image = imgEl.attr("src") || imgEl.attr("data-src") || imgEl.attr("data-lazy-src") || "";
     if (image.startsWith("data:image")) image = "";
 
     const chapters = [];
@@ -441,31 +519,19 @@ function parseSeriesCards($, scope, { withChapters = true } = {}) {
         const chLink = $(li).find("a").attr("href") || "";
         const chTitle = $(li).find("a").text().trim();
         const chTime = translateTime($(li).find("span").text().trim());
-        if (chLink && chTitle) {
-          chapters.push({ title: chTitle, link: chLink, time: chTime, locked: false });
-        }
+        if (chLink && chTitle) chapters.push({ title: chTitle, link: chLink, time: chTime, locked: false });
       });
     }
 
-    const slug = extractSlugFromUrl(link);
-    const latest = chapters[0] || {};
-    const oldest = chapters[chapters.length - 1] || {};
-    const description = card.find("p").first().text().trim();
-
-    out.push({
-      source: "komikindo",
+    push({
+      link,
       title,
-      slug,
       image,
-      detail_link: link,
-      description,
-      type_genre: "",
-      info: latest.time || "",
-      chapter_awal: oldest.title || "",
-      chapter_terbaru: latest.title || "",
       chapters,
+      description: card.find("p").first().text().trim(),
     });
   });
+
   return out;
 }
 
