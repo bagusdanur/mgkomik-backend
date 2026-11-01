@@ -5835,6 +5835,7 @@ app.get("/meionovels/image", async (req, res) => {
 
 require("./luvyaa")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 require("./komikindo")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
+require("./voratoon")(app, { getCache, setCache, coalescedScrape });
 require("./ikiru")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 require("./asura")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 require("./doujiva")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
