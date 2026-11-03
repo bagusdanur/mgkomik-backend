@@ -138,6 +138,17 @@ function coverProxyUrl(rawSrc) {
   return `/vt/image?url=${encodeURIComponent(absolute)}`;
 }
 
+function payloadChapterNumbers(html) {
+  const numbers = new Set();
+  const re = /\\?"chapterIndex\\?":\s*(\d+(?:\.\d+)?)/g;
+  let match;
+  while ((match = re.exec(html))) {
+    const num = Number(match[1]);
+    if (Number.isFinite(num)) numbers.add(num);
+  }
+  return [...numbers];
+}
+
 function parseChaptersFromEmbedded(html, slug) {
   // Payload RSC memuat chapters\":[{"chapterIndex":5,...}]
   const found = new Map();
@@ -334,6 +345,10 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
             genres: [],
             chapters: chapters.reverse(),
             total_chapter: total,
+            latest_chapter: Math.max(
+              ...payloadChapterNumbers(html),
+              ...chapters.map((chapter) => Number(chapter.number) || 0),
+            ),
             mangaId: slug,
           },
         };
@@ -371,6 +386,27 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
         });
 
         const chapterNum = Number(chapterNumber);
+        // Chapter terakhir tidak boleh punya tombol next: ambil total chapter
+        // dari cache detail (kalau ada) atau dari link chapter di halaman ini.
+        const detailCached = await cacheGet(`vt:detail:${seriesSlug}`, VT_TTL.detail);
+        // Nomor chapter terakhir = angka terbesar di daftar chapter, bukan
+        // total_chapter (situs kadang menghitung chapter yang tidak terbit).
+        let chapterNumbers = (detailCached?.data?.chapters || [])
+          .map((chapter) => Number(chapter.number))
+          .filter((value) => Number.isFinite(value));
+        if (!chapterNumbers.length) {
+          try {
+            const detailHtml = await fetchHtml(`${BASE}/series/${seriesSlug}`);
+            chapterNumbers = parseChaptersFromEmbedded(detailHtml, seriesSlug)
+              .map((chapter) => Number(chapter.number))
+              .filter((value) => Number.isFinite(value));
+          } catch {
+            chapterNumbers = [];
+          }
+        }
+        const payloadLatest = Number(detailCached?.data?.latest_chapter || 0);
+        const lastChapter = payloadLatest
+          || (chapterNumbers.length ? Math.max(...chapterNumbers) : chapterNum);
         return {
           success: images.length > 0,
           mangaId: seriesSlug,
@@ -378,7 +414,7 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
           currentChapter: `Chapter ${chapterNumber}`,
           images,
           prev: chapterNum > 1 ? `${seriesSlug}/chapter/${chapterNum - 1}` : null,
-          next: `${seriesSlug}/chapter/${chapterNum + 1}`,
+          next: chapterNum < lastChapter ? `${seriesSlug}/chapter/${chapterNum + 1}` : null,
           source_broken: false,
           source_status: 200,
         };
