@@ -17,7 +17,7 @@ const COVER_HOST = Buffer.from("Y3ZyLnZvcmF0b29uLmlk", "base64").toString("utf8"
 const API_HOST = Buffer.from("djkudm9yYXRvb24uY29t", "base64").toString("utf8");
 const ALT_HOST = Buffer.from("MTIudm9yYXRvb24uY29t", "base64").toString("utf8");
 
-const BASE = BASE_HOST;
+const BASE = "https://12.voratoon.com";
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
@@ -31,6 +31,45 @@ function absolute(req, pathValue) {
   return `${proto}://${req.get("host")}${pathValue}`;
 }
 
+
+const fs = require("node:fs");
+const path = require("node:path");
+
+// Cache dua lapis: memori (cepat) + disk (tahan restart). Halaman sumber bisa
+// butuh 7-25 detik, jadi data disimpan lama dan dipakai ulang.
+const VT_CACHE_DIR = process.env.VT_CACHE_DIR || "/home/ryukomik/ryukomik-backend/data/vt-cache";
+const VT_TTL = { pustaka: 10 * 60e3, detail: 6 * 3600e3, chapter: 24 * 3600e3, filters: 24 * 3600e3 };
+const memCache = new Map();
+
+function cacheFile(key) {
+  return path.join(VT_CACHE_DIR, key.replace(/[^a-z0-9:_-]/gi, "_") + ".json");
+}
+
+async function cacheGet(key, ttl) {
+  const now = Date.now();
+  const mem = memCache.get(key);
+  if (mem && now - mem.at <= ttl) return mem.payload;
+  try {
+    const entry = JSON.parse(await fs.promises.readFile(cacheFile(key), "utf8"));
+    if (now - entry.at > ttl) return null;
+    memCache.set(key, entry);
+    return entry.payload;
+  } catch {
+    return null;
+  }
+}
+
+async function cacheSet(key, payload) {
+  const entry = { at: Date.now(), payload };
+  memCache.set(key, entry);
+  try {
+    await fs.promises.mkdir(VT_CACHE_DIR, { recursive: true });
+    await fs.promises.writeFile(cacheFile(key), JSON.stringify(entry));
+  } catch (error) {
+    console.error("[VT] gagal tulis cache:", error.message);
+  }
+}
+
 function vlog(...args) {
   console.log("[VT]", ...args);
 }
@@ -42,7 +81,7 @@ async function fetchHtml(url) {
       Accept: "text/html,application/xhtml+xml",
       "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
     },
-    timeout: 20000,
+    timeout: 60000,
     maxContentLength: 30 * 1024 * 1024,
   });
   return typeof data === "string" ? data : "";
@@ -237,7 +276,7 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
     try {
       const page = Math.max(1, parseInt(req.query.page) || 1);
       const cacheKey = `vt:pustaka:${page}`;
-      const cached = getCache(cacheKey);
+      const cached = await cacheGet(cacheKey, VT_TTL.pustaka);
       if (cached) return res.json(cached);
 
       const payload = await coalescedScrape(cacheKey, async () => {
@@ -252,7 +291,7 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
           data,
         };
       });
-      if (payload?.success && payload.data?.length) setCache(cacheKey, payload, 300);
+      if (payload?.success && payload.data?.length) cacheSet(cacheKey, payload);
       res.json(payload);
     } catch (error) {
       console.error("❌ VT pustaka:", error.message);
@@ -266,7 +305,7 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
       if (!/^[a-z0-9-]+$/i.test(slug)) return res.status(400).json({ success: false, message: "slug tidak valid" });
 
       const cacheKey = `vt:detail:${slug}`;
-      const cached = getCache(cacheKey);
+      const cached = await cacheGet(cacheKey, VT_TTL.pustaka);
       if (cached) return res.json(cached);
 
       const payload = await coalescedScrape(cacheKey, async () => {
@@ -299,7 +338,7 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
           },
         };
       });
-      if (payload?.success) setCache(cacheKey, payload, 600);
+      if (payload?.success) cacheSet(cacheKey, payload);
       res.json(payload);
     } catch (error) {
       console.error("❌ VT detail:", error.message);
@@ -314,7 +353,7 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
       if (!match) return res.status(400).json({ success: false, message: "slug chapter tidak valid" });
       const [, seriesSlug, chapterNumber] = match;
       const cacheKey = `vt:chapter:${seriesSlug}:${chapterNumber}`;
-      const cached = getCache(cacheKey);
+      const cached = await cacheGet(cacheKey, VT_TTL.pustaka);
       if (cached) return res.json(cached);
 
       const payload = await coalescedScrape(cacheKey, async () => {
@@ -344,7 +383,7 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
           source_status: 200,
         };
       });
-      if (payload?.success) setCache(cacheKey, payload, 7200);
+      if (payload?.success) cacheSet(cacheKey, payload);
       res.json(payload);
     } catch (error) {
       console.error("❌ VT chapter:", error.message);
@@ -371,7 +410,7 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
       const upstream = await axios.get(target, {
         responseType: "arraybuffer",
         headers: { "User-Agent": UA, Accept: "image/avif,image/webp,image/*,*/*;q=0.8", Referer: `${BASE}/` },
-        timeout: 20000,
+        timeout: 60000,
         maxContentLength: 30 * 1024 * 1024,
       });
       res.setHeader("Content-Type", upstream.headers["content-type"] || "image/jpeg");
@@ -388,7 +427,7 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
       if (!query) return res.json({ success: true, data: [] });
 
       const cacheKey = `vt:search:${query.toLowerCase()}`;
-      const cached = getCache(cacheKey);
+      const cached = await cacheGet(cacheKey, VT_TTL.pustaka);
       if (cached) return res.json(cached);
 
       const payload = await coalescedScrape(cacheKey, async () => {
@@ -424,7 +463,7 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
         return { success: true, source: "vt", query, total: items.length, data: items };
       });
 
-      if (payload?.success) setCache(cacheKey, payload, 600);
+      if (payload?.success) cacheSet(cacheKey, payload);
       res.json(payload);
     } catch (error) {
       console.error("❌ VT search:", error.message);
@@ -442,7 +481,7 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
       const orderby = String(req.query.orderby || "").trim();
 
       const cacheKey = `vt:filter:${page}:${genre}:${genre2}:${status}:${tipe}:${orderby}`;
-      const cached = getCache(cacheKey);
+      const cached = await cacheGet(cacheKey, VT_TTL.pustaka);
       if (cached) return res.json(cached);
 
       const params = new URLSearchParams();
@@ -466,7 +505,7 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
           data,
         };
       });
-      if (payload?.success && payload.data?.length) setCache(cacheKey, payload, 300);
+      if (payload?.success && payload.data?.length) cacheSet(cacheKey, payload);
       res.json(payload);
     } catch (error) {
       console.error("❌ VT filter:", error.message);
@@ -477,7 +516,7 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
   app.get("/vt/filters", async (req, res) => {
     try {
       const cacheKey = "vt:filters";
-      const cached = getCache(cacheKey);
+      const cached = await cacheGet(cacheKey, VT_TTL.pustaka);
       if (cached) return res.json(cached);
 
       const payload = await coalescedScrape(cacheKey, async () => {
@@ -511,13 +550,46 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
           },
         };
       });
-      if (payload?.success) setCache(cacheKey, payload, 6 * 3600);
+      if (payload?.success) cacheSet(cacheKey, payload);
       res.json(payload);
     } catch (error) {
       console.error("❌ VT filters:", error.message);
       res.status(500).json({ success: false, data: { tipe: [], status: [], genre: [] } });
     }
   });
+
+
+  // Pemanasan cache: situs sumber butuh 7-20 detik per halaman, jadi cache
+  // diisi di belakang supaya pengunjung tidak menunggu jalur dingin.
+  const SELF = `http://127.0.0.1:${process.env.PORT || 3012}`;
+  let warming = false;
+
+  async function warmCache() {
+    if (warming) return;
+    warming = true;
+    const started = Date.now();
+    try {
+      const responses = await Promise.all([
+        fetch(`${SELF}/vt/pustaka?page=1`).catch(() => null),
+        fetch(`${SELF}/vt/pustaka?page=2`).catch(() => null),
+        fetch(`${SELF}/vt/filters`).catch(() => null),
+      ]);
+      const first = responses[0];
+      const listing = first ? await first.json().catch(() => null) : null;
+      const slugs = (listing?.data || []).slice(0, 6).map((item) => item.slug).filter(Boolean);
+      for (const slug of slugs) {
+        await fetch(`${SELF}/vt/detail/${encodeURIComponent(slug)}`).catch(() => null);
+      }
+      vlog(`cache hangat dalam ${Math.round((Date.now() - started) / 1000)}s (${slugs.length} seri)`);
+    } catch (error) {
+      vlog("warm gagal:", error.message);
+    } finally {
+      warming = false;
+    }
+  }
+
+  setTimeout(() => void warmCache(), 8000);
+  setInterval(() => void warmCache(), 60 * 60 * 1000);
 
   vlog("routes registered: /vt/pustaka, /vt/detail/:slug, /vt/chapter/*, /vt/image");
 }
