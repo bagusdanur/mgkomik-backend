@@ -102,6 +102,14 @@ function coverProxyUrl(rawSrc) {
 function parseChaptersFromEmbedded(html, slug) {
   // Payload RSC memuat chapters\":[{"chapterIndex":5,...}]
   const found = new Map();
+  // Payload RSC hanya memuat 5 chapter terbaru, tapi HTML memuat link semua
+  // chapter. Gabungkan supaya daftar chapter tidak terpotong.
+  const linkRe = new RegExp(`/series/${slug}/chapter/([0-9.]+)`, "gi");
+  let linkMatch;
+  while ((linkMatch = linkRe.exec(html))) {
+    const num = Number(linkMatch[1]);
+    if (Number.isFinite(num)) found.set(num, null);
+  }
   const re = /\\?"chapterIndex\\?":\s*(\d+(?:\.\d+)?)/g;
   let match;
   while ((match = re.exec(html))) {
