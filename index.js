@@ -466,10 +466,20 @@ function getOriginalKiryuuImageUrl(url = "") {
   return kiryuuUrl(value);
 }
 
+function isKiryuuImageHost(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host === "kiryuu.to" || host.endsWith(".kiryuu.to") || host === "kiryuu.org" || host.endsWith(".kiryuu.org");
+  } catch { return false; }
+}
+
 function toKiryuuBackendImageUrl(url, req) {
   const originalUrl = getOriginalKiryuuImageUrl(url);
   if (!originalUrl) return "";
-  // Cuma yuucdn.com yang perlu proxy — lainnya direct
+  // Cuma yuucdn.com yang perlu proxy di payload — lainnya direct.
+  // Endpoint /kiryuu/image tetap menerima kiryuu.to sebagai kandidat cadangan
+  // yang dibangun frontend (direct gagal -> proxy), supaya egress VPS hanya
+  // terpakai saat benar-benar dibutuhkan.
   if (originalUrl.includes("yuucdn.com")) {
     return `${getRequestBaseUrl(req)}/kiryuu/image?url=${encodeURIComponent(originalUrl)}`;
   }
@@ -4506,13 +4516,17 @@ app.get("/kiryuu/image", async (req, res) => {
   try {
     const imageUrl = getOriginalKiryuuImageUrl(req.query.url || "");
 
-    // Validasi: cuma yuucdn.com yang boleh diproxy lewat sini
+    // Validasi: yuucdn.com + kiryuu.to/org yang boleh diproxy lewat sini
     let isAllowed = false;
+    let isKiryuuHost = false;
     try {
       const parsedUrl = new URL(imageUrl);
-      const host = parsedUrl.hostname;
+      const host = parsedUrl.hostname.toLowerCase();
       if (host === "yuucdn.com" || host.endsWith(".yuucdn.com")) {
         isAllowed = true;
+      } else if (host === "kiryuu.to" || host.endsWith(".kiryuu.to") || host === "kiryuu.org" || host.endsWith(".kiryuu.org")) {
+        isAllowed = true;
+        isKiryuuHost = true;
       }
     } catch (e) {
       isAllowed = false;
@@ -4522,11 +4536,19 @@ app.get("/kiryuu/image", async (req, res) => {
       return res.status(400).send("URL gambar tidak valid");
     }
 
-    const headers = {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
-      Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-      Referer: `${KIRYUU_BASE_URL}/`,
-    };
+    // PENTING: v7.kiryuu.to membalas 403 (Cloudflare 1011) untuk SEMUA request
+    // yang membawa header Referer apa pun, dan 403 (1010) untuk UA non-browser.
+    // Jadi untuk host kiryuu: UA browser saja, TANPA Referer.
+    const headers = isKiryuuHost
+      ? {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+          Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        }
+      : {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+          Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+          Referer: `${KIRYUU_BASE_URL}/`,
+        };
 
     let imageBuffer;
     let contentType = "image/jpeg";

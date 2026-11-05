@@ -535,6 +535,68 @@ function parseSeriesCards($, scope, { withChapters = true } = {}) {
   return out;
 }
 
+// Cover seri yang benar dari HTML detail. JANGAN pakai $('img[src*="manga-images"]').first():
+// gambar pertama di halaman adalah sidebar "terbaru" (seri lain). Sumber yang dipakai berurutan:
+// og:image yang mengandung slug, og:image manga-images, image BlogPosting, lalu img yang src-nya
+// mengandung slug. Situs tidak menaruh image di JSON-LD BookSeries (cek 2026-11-05).
+function extractSeriesCover($, slug) {
+  const needle = slug ? slug.toLowerCase() : "";
+  const ogImages = [];
+  $('meta[property="og:image"]').each((_, el) => {
+    const c = ($(el).attr("content") || "").trim();
+    if (c) ogImages.push(c);
+  });
+  const bySlug = ogImages.find((u) => needle && u.toLowerCase().includes(needle));
+  if (bySlug) return bySlug;
+  const byManga = ogImages.find((u) => u.includes("manga-images"));
+  if (byManga) return byManga;
+
+  let blogImage = "";
+  $('script[type="application/ld+json"]').each((_, el) => {
+    if (blogImage) return;
+    try {
+      const parsed = JSON.parse($(el).html() || "");
+      const items = Array.isArray(parsed) ? parsed : parsed["@graph"] || [parsed];
+      for (const it of items) {
+        if (it && it["@type"] === "BlogPosting" && it.image) {
+          blogImage = Array.isArray(it.image) ? (it.image[0] && (it.image[0].url || it.image[0])) || "" : (it.image.url || it.image) || "";
+          if (blogImage) break;
+        }
+      }
+    } catch (e) { /* abaikan */ }
+  });
+  if (blogImage) return String(blogImage);
+
+  if (needle) {
+    let hit = "";
+    $('img[src*="' + slug + '"], img[data-src*="' + slug + '"]').each((_, el) => {
+      if (hit) return;
+      hit = $(el).attr("src") || $(el).attr("data-src") || "";
+    });
+    if (hit) return hit;
+  }
+  return "";
+}
+
+// Kartu bm-row tertentu memang tidak punya <img> di listing (cover anchor hanya badge).
+// Ambil cover-nya dari halaman detail (og:image). Dibatasi: hanya untuk item kosong,
+// jadi biaya = beberapa request detail per halaman, di dalam cache pustaka.
+async function enrichMissingCovers(results) {
+  const missing = (results || []).filter((r) => !r.image && r.slug);
+  if (!missing.length) return results;
+  await Promise.all(missing.map(async (item) => {
+    try {
+      const html = await customFetch(`${BASE_URL}/series/${item.slug}/`, { referer: BASE_URL + "/" });
+      const $ = cheerio.load(html);
+      const cover = extractSeriesCover($, item.slug);
+      if (cover) item.image = cover;
+    } catch (e) {
+      vlog(`[Komikindo] cover fallback gagal untuk ${item.slug}: ${e.message}`);
+    }
+  }));
+  return results;
+}
+
 async function scrapePustaka({ page = 1 } = {}) {
   try {
     const url = page === 1 ? `${BASE_URL}/` : `${BASE_URL}/page/${page}/`;
@@ -547,6 +609,7 @@ async function scrapePustaka({ page = 1 } = {}) {
     let scope = $("#latest-series");
     if (!scope.length) scope = $("body");
     const results = parseSeriesCards($, scope, { withChapters: true });
+    await enrichMissingCovers(results);
 
     let totalPages = 1;
     const pages = [];
@@ -604,9 +667,12 @@ async function scrapeDetail(url) {
     });
 
     const title = $("h1").first().text().trim() || (book && book.name) || "";
+    const detailSlug = (() => {
+      try { return new URL(url).pathname.replace(/^\/series\//, "").replace(/\/$/, ""); } catch { return ""; }
+    })();
     const thumbnail =
       (book && book.image) ||
-      $('img[src*="manga-images"]').first().attr("src") ||
+      extractSeriesCover($, detailSlug) ||
       "";
     const author = (book && book.author && book.author.name) || "";
     const artist = (book && book.artist && book.artist.name) || "";
@@ -843,6 +909,7 @@ async function scrapePustakaFilter({ orderby, tipe, genre, genre2, status, page 
 
     // Halaman /series/ tidak memuat daftar chapter per kartu.
     const results = parseSeriesCards($, $("body"), { withChapters: false });
+    await enrichMissingCovers(results);
 
     const hasNext =
       $(`a.page-numbers[href*="/page/${page + 1}/"]`).length > 0 ||
