@@ -15,9 +15,9 @@ const BASE_HOST = Buffer.from("aHR0cHM6Ly92OS52b3JhdG9vbi5jb20=", "base64").toSt
 const CDN_HOST = Buffer.from("Y2RuLnZvcmF0b29uLmNvbQ==", "base64").toString("utf8");
 const COVER_HOST = Buffer.from("Y3ZyLnZvcmF0b29uLmlk", "base64").toString("utf8");
 const API_HOST = Buffer.from("djkudm9yYXRvb24uY29t", "base64").toString("utf8");
-const ALT_HOST = Buffer.from("MTIudm9yYXRvb24uY29t", "base64").toString("utf8");
+const ALT_HOST = Buffer.from("MTMudm9yYXRvb24uY29t", "base64").toString("utf8");
 
-const BASE = "https://12.voratoon.com";
+const BASE = "https://13.voratoon.com";
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
@@ -293,12 +293,16 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
       const payload = await coalescedScrape(cacheKey, async () => {
         const html = await fetchHtml(`${BASE}/updates?page=${page}`);
         const data = parseUpdatesPage(html).map((item) => ({ ...item, image: absolute(req, item.image) }));
+        const pageNumbers = [...html.matchAll(/[?&]page=(\d+)/g)].map((m) => Number(m[1]));
+        const totalPages = pageNumbers.length ? Math.max(...pageNumbers) : page + 1;
+        const hasMore = page < totalPages;
         return {
           success: true,
           source: "vt",
           page,
           total: data.length,
-          meta: { currentPage: page, totalPages: page + 1, totalItems: data.length },
+          meta: { currentPage: page, totalPages, totalItems: totalPages * data.length, hasNextPage: hasMore },
+          hasMore,
           data,
         };
       });
@@ -532,12 +536,16 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
       const payload = await coalescedScrape(cacheKey, async () => {
         const html = await fetchHtml(`${BASE}/browse?${params.toString()}`);
         const data = parseBrowseCards(html, req);
+        const pageNumbers = [...html.matchAll(/[?&]page=(\d+)/g)].map((m) => Number(m[1]));
+        const totalPages = pageNumbers.length ? Math.max(...pageNumbers) : page + 1;
+        const hasMore = page < totalPages;
         return {
           success: true,
           source: "vt",
           page,
           total: data.length,
-          meta: { currentPage: page, totalPages: page + 1, totalItems: data.length },
+          meta: { currentPage: page, totalPages, totalItems: totalPages * data.length, hasNextPage: hasMore },
+          hasMore,
           data,
         };
       });
