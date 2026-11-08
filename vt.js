@@ -32,6 +32,25 @@ function withAbsoluteImages(req, payload) {
   };
 }
 
+function withAbsoluteDetail(req, payload) {
+  if (!payload?.data?.thumbnail) return payload;
+  return {
+    ...payload,
+    data: {
+      ...payload.data,
+      thumbnail: absolute(req, payload.data.thumbnail),
+    },
+  };
+}
+
+function withAbsoluteChapter(req, payload) {
+  if (!payload?.images?.length) return payload;
+  return {
+    ...payload,
+    images: payload.images.map((image) => absolute(req, image)),
+  };
+}
+
 function absolute(req, pathValue) {
   if (!pathValue) return "";
   const proto = String(req.headers["x-forwarded-proto"] || req.protocol || "https")
@@ -335,7 +354,7 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
 
       const cacheKey = `vt:detail:${slug}`;
       const cached = await cacheGet(cacheKey, VT_TTL.pustaka);
-      if (cached) return res.json(cached);
+      if (cached) return res.json(withAbsoluteDetail(req, cached));
 
       const payload = await coalescedScrape(cacheKey, async () => {
         const html = await fetchHtml(`${BASE}/series/${slug}`);
@@ -372,7 +391,7 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
         };
       });
       if (payload?.success) cacheSet(cacheKey, payload);
-      res.json(payload);
+      res.json(withAbsoluteDetail(req, payload));
     } catch (error) {
       console.error("❌ VT detail:", error.message);
       res.status(500).json({ success: false, message: error.message });
@@ -387,7 +406,7 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
       const [, seriesSlug, chapterNumber] = match;
       const cacheKey = `vt:chapter:${seriesSlug}:${chapterNumber}`;
       const cached = await cacheGet(cacheKey, VT_TTL.pustaka);
-      if (cached) return res.json(cached);
+      if (cached) return res.json(withAbsoluteChapter(req, cached));
 
       const payload = await coalescedScrape(cacheKey, async () => {
         const html = await fetchHtml(`${BASE}/series/${seriesSlug}/chapter/${chapterNumber}`);
@@ -438,7 +457,7 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
         };
       });
       if (payload?.success) cacheSet(cacheKey, payload);
-      res.json(payload);
+      res.json(withAbsoluteChapter(req, payload));
     } catch (error) {
       console.error("❌ VT chapter:", error.message);
       res.status(500).json({ success: false, message: error.message });
