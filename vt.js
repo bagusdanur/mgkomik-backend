@@ -21,13 +21,27 @@ const BASE = "https://13.voratoon.com";
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+function withAbsoluteImages(req, payload) {
+  if (!payload?.data?.length) return payload;
+  return {
+    ...payload,
+    data: payload.data.map((item) => ({
+      ...item,
+      image: item.image ? absolute(req, item.image) : "",
+    })),
+  };
+}
+
 function absolute(req, pathValue) {
   if (!pathValue) return "";
-  if (/^https?:/i.test(pathValue)) return pathValue;
-  // Di belakang nginx, req.protocol selalu http — pakai x-forwarded-proto.
   const proto = String(req.headers["x-forwarded-proto"] || req.protocol || "https")
     .split(",")[0]
     .trim();
+  if (/^https?:\/\/127\.0\.0\.1(?::3012)?(?:\/|$)/i.test(pathValue)) {
+    const parsed = new URL(pathValue);
+    return `${proto}://${req.get("host")}${parsed.pathname}${parsed.search}${parsed.hash}`;
+  }
+  if (/^https?:/i.test(pathValue)) return pathValue;
   return `${proto}://${req.get("host")}${pathValue}`;
 }
 
@@ -288,7 +302,7 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
       const page = Math.max(1, parseInt(req.query.page) || 1);
       const cacheKey = `vt:pustaka:${page}`;
       const cached = await cacheGet(cacheKey, VT_TTL.pustaka);
-      if (cached) return res.json(cached);
+      if (cached) return res.json(withAbsoluteImages(req, cached));
 
       const payload = await coalescedScrape(cacheKey, async () => {
         const html = await fetchHtml(`${BASE}/updates?page=${page}`);
