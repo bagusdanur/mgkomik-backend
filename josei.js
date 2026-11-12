@@ -13,6 +13,19 @@ const IMAGE_HOSTS = new Set([
   "www.rosyscans.com",
   "i.ibb.co",
 ]);
+// Jetpack/Photon (i0–i3.wp.com) dipakai upstream untuk cover. Host-nya generik,
+// jadi hanya diterima kalau segmen pertama path-nya host asal yang kita kenal
+// (mis. i0.wp.com/rosyscans.com/wp-content/...).
+const PHOTON_HOST_RE = /^i[0-3]\.wp\.com$/;
+function isAllowedImageUrl(parsed) {
+  const host = parsed.hostname.toLowerCase();
+  if (IMAGE_HOSTS.has(host)) return true;
+  if (PHOTON_HOST_RE.test(host)) {
+    const origin = (parsed.pathname.split("/")[1] || "").toLowerCase();
+    return IMAGE_HOSTS.has(origin);
+  }
+  return false;
+}
 const PAGE_SIZE = 24;
 let catalogCache = { expires: 0, data: null, pending: null };
 let metadataCache = { expires: 0, data: null, pending: null };
@@ -87,12 +100,30 @@ function pathSlug(value = "", prefix = "") {
   }
 }
 
+function dePhoton(url) {
+  // iN.wp.com/<host>/<path> → https://<host>/<path>. Origin rosyscans melayani
+  // file yang sama, dan menghindari rate-limit Jetpack (429 saat burst gambar).
+  try {
+    const parsed = new URL(url);
+    if (!PHOTON_HOST_RE.test(parsed.hostname.toLowerCase())) return url;
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    if (segments.length < 2) return url;
+    const origin = segments[0].toLowerCase();
+    if (!IMAGE_HOSTS.has(origin)) return url;
+    return `https://${origin}/${segments.slice(1).join("/")}`;
+  } catch {
+    return url;
+  }
+}
+
 function normalizeImage(value = "") {
   const src = clean(value).replace(/&amp;/g, "&");
   if (!src || /^data:|^blob:/i.test(src)) return "";
-  if (src.startsWith("//")) return `https:${src}`;
-  if (/^https?:\/\//i.test(src)) return src.replace(/^http:/i, "https:");
-  return `${BASE}/${src.replace(/^\/+/, "")}`;
+  let absolute;
+  if (src.startsWith("//")) absolute = `https:${src}`;
+  else if (/^https?:\/\//i.test(src)) absolute = src.replace(/^http:/i, "https:");
+  else absolute = `${BASE}/${src.replace(/^\/+/, "")}`;
+  return dePhoton(absolute);
 }
 
 function baseUrl(req) {
@@ -382,7 +413,7 @@ module.exports = function registerJosei(app, { getCache, setCache, coalescedScra
     try {
       const imageUrl = normalizeImage(req.query.url);
       const parsed = new URL(imageUrl);
-      if (parsed.protocol !== "https:" || !IMAGE_HOSTS.has(parsed.hostname.toLowerCase())) return res.status(400).send("URL gambar Josei tidak valid");
+      if (parsed.protocol !== "https:" || !isAllowedImageUrl(parsed)) return res.status(400).send("URL gambar Josei tidak valid");
       const cached = getImageCache(imageUrl || url);
       if (cached) {
         return res.set('Content-Type', cached.contentType).set('Cache-Control', 'public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800').send(cached.buffer);
