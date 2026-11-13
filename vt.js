@@ -171,6 +171,61 @@ function coverProxyUrl(rawSrc) {
   return `/vt/image?url=${encodeURIComponent(absolute)}`;
 }
 
+/**
+ * Reader baru VoraToon tidak lagi menaruh <img> di HTML (gambar dimuat lewat
+ * API terenkripsi). Gambar masih ada di CDN dengan pola:
+ *   https://cdn.voratoon.com/wp-content/img/<huruf>/<folderCdn>/<chapter3>/<halaman3>.jpg
+ * folderCdn masih tersembunyi di payload RSC halaman.
+ */
+function parseFolderCdn(html) {
+  const m = String(html || "").match(/folderCdn\\?"\s*:\s*\\?"([A-Za-z0-9_.-]+)/);
+  return m ? m[1] : "";
+}
+
+function cdnBucket(folderCdn) {
+  const first = String(folderCdn || "").trim().charAt(0);
+  if (!first) return "";
+  return /[0-9]/.test(first) ? "0-9" : first.toUpperCase();
+}
+
+async function probeCdnPage(url) {
+  try {
+    const res = await axios.get(url, {
+      responseType: "arraybuffer",
+      headers: { "User-Agent": UA, Accept: "image/*,*/*;q=0.8", Referer: `${BASE}/`, Range: "bytes=0-0" },
+      timeout: 12000,
+      validateStatus: () => true,
+    });
+    return res.status === 200 || res.status === 206;
+  } catch {
+    return false;
+  }
+}
+
+async function probeChapterImages(chapterNumber, folderCdn, extension = "jpg") {
+  const bucket = cdnBucket(folderCdn);
+  if (!bucket || !folderCdn) return [];
+  const chapterPad = String(Math.floor(Number(chapterNumber) || 0)).padStart(3, "0");
+  const base = `https://${CDN_HOST}/wp-content/img/${bucket}/${folderCdn}/${chapterPad}/`;
+  const CONCURRENCY = 6;
+  const MAX_PAGES = 200;
+  const found = [];
+  let start = 1;
+  while (start <= MAX_PAGES) {
+    const batch = [];
+    for (let i = start; i < start + CONCURRENCY && i <= MAX_PAGES; i += 1) batch.push(i);
+    const results = await Promise.all(batch.map((n) => probeCdnPage(`${base}${String(n).padStart(3, "0")}.${extension}`)));
+    let gap = false;
+    for (let k = 0; k < results.length; k += 1) {
+      if (results[k]) found.push(`${base}${String(batch[k]).padStart(3, "0")}.${extension}`);
+      else { gap = true; break; }
+    }
+    if (gap) break;
+    start += CONCURRENCY;
+  }
+  return found;
+}
+
 function payloadChapterNumbers(html) {
   const numbers = new Set();
   const re = /\\?"chapterIndex\\?":\s*(\d+(?:\.\d+)?)/g;
@@ -421,6 +476,18 @@ function registerVtRoutes(app, { getCache, setCache, coalescedScrape }) {
           seen.add(src);
           images.push(absolute(req, `/vt/image?url=${encodeURIComponent(src)}`));
         });
+
+        // Fallback reader baru: <img> kosong, gambar hanya lewat API terenkripsi.
+        if (!images.length) {
+          const folderCdn = parseFolderCdn(html);
+          let probed = await probeChapterImages(chapterNumber, folderCdn, "jpg");
+          if (!probed.length) probed = await probeChapterImages(chapterNumber, folderCdn, "png");
+          for (const src of probed) {
+            if (seen.has(src)) continue;
+            seen.add(src);
+            images.push(absolute(req, `/vt/image?url=${encodeURIComponent(src)}`));
+          }
+        }
 
         const chapterNum = Number(chapterNumber);
         // Chapter terakhir tidak boleh punya tombol next: ambil total chapter
