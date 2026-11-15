@@ -3,7 +3,7 @@
 const axios = require("axios");
 const cheerio = require("cheerio");
 
-const BASE = "https://rosyscans.id";
+const BASE = "https://rosyscans.com";
 const PROXY_URL = process.env.JOSEI_PROXY_URL || "https://proxy.kopipaitboskuh.workers.dev/?url=";
 const IMAGE_HOSTS = new Set([
   "rosyscans.id",
@@ -405,7 +405,13 @@ async function scrapeSearch(query, page = 1) {
   return { success: true, query, meta: { currentPage: page, totalPages: page, totalItems: items.length, hasNextPage: false }, data: items.map((item) => ({ title: item.title, image: item.image, detail_link: item.detail_link, type_genre: item.type_genre, update: item.chapter_terbaru, rating: "0", slug: item.slug })) };
 }
 async function scrapeDetail(slug) { return parseDetail(await joseiFetch(`/manga/${encodeURIComponent(slug)}/`), slug); }
-async function scrapeChapter(seriesSlug, chapterSlug) { return parseChapter(await joseiFetch(`/${encodeURIComponent(chapterSlug)}/`, { referer: `${BASE}/manga/${seriesSlug}/` }), seriesSlug, chapterSlug); }
+async function scrapeChapter(seriesSlug, chapterSlug) {
+  // RosyScans memakai URL datar: /<seri>-chapter-55/. Kode lama memakai
+  // /chapter-55/ saja, jadi setiap chapter berakhir 404 setelah mereka pindah
+  // domain ke rosyscans.com.
+  const flat = String(chapterSlug).startsWith(seriesSlug) ? String(chapterSlug) : `${seriesSlug}-${chapterSlug}`;
+  return parseChapter(await joseiFetch(`/${encodeURIComponent(flat)}/`, { referer: `${BASE}/manga/${seriesSlug}/` }), seriesSlug, chapterSlug);
+}
 
 module.exports = function registerJosei(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache }) {
   app.get("/josei/image", async (req, res) => {
@@ -504,6 +510,26 @@ module.exports = function registerJosei(app, { getCache, setCache, coalescedScra
     if (cached) return res.json(cached);
     try { const result = rewriteImages(await coalescedScrape(key, () => scrapeDetail(slug)), req); setCache(key, result, 900); res.json(result); }
     catch (error) { console.error(`[Josei Detail Error] ${slug}: ${error.message}`); res.status(error.status === 404 ? 404 : 502).json({ success: false, message: error.message }); }
+  });
+
+  // Kompatibilitas: web mengirim SATU segmen (`seri-chapter-55`), sementara
+  // route di bawah butuh dua. Tanpa ini semua chapter Josei 404.
+  app.get("/josei/chapter/:slug", async (req, res) => {
+    const full = pathSlug(req.params.slug);
+    const cut = full.lastIndexOf("-chapter-");
+    if (cut <= 0) return res.status(400).json({ success: false, message: "Slug chapter tidak lengkap" });
+    const seriesSlug = pathSlug(full.slice(0, cut), "manga");
+    const chapterSlug = pathSlug(full.slice(cut + 1));
+    const key = `josei:chapter:${seriesSlug}:${chapterSlug}`, cached = getCache(key);
+    if (cached) return res.json(cached);
+    try {
+      const result = rewriteImages(await coalescedScrape(key, () => scrapeChapter(seriesSlug, chapterSlug)), req);
+      setCache(key, result, 7200);
+      res.json(result);
+    } catch (error) {
+      console.error(`[Josei Chapter Error] ${seriesSlug}/${chapterSlug}: ${error.message}`);
+      res.status(error.status === 404 ? 404 : 502).json({ success: false, message: error.message });
+    }
   });
 
   app.get("/josei/chapter/:seriesSlug/:chapterSlug", async (req, res) => {
