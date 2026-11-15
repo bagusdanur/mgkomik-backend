@@ -2597,6 +2597,11 @@ function sekteNormalizeImageUrl(url = "") {
     const imageUrl = new URL(value, SEKTE_BASE_URL);
     if (imageUrl.pathname.includes("/assets/img/readerarea.svg")) return "";
 
+    // Situs pembaca berjalan di HTTPS: gambar http:// diblokir browser sebagai
+    // mixed content, jadi seluruh chapter tampak rusak. CDN Sekte (cdnkomikindo)
+    // melayani HTTPS, jadi naikkan skemanya.
+    if (imageUrl.protocol === "http:") imageUrl.protocol = "https:";
+
     imageUrl.pathname = imageUrl.pathname
       .split("/")
       .map((segment) => encodeURIComponent(decodeURIComponent(segment)))
@@ -4121,7 +4126,7 @@ app.get("/komiku/chapter/:slug", async (req, res) => {
           if (alt?.success && Array.isArray(alt.images) && alt.images.length) {
             // Komikid me-rewrite gambar ke host request-nya (127.0.0.1) karena
             // dipanggil internal → ganti ke domain API publik.
-            const publicBase = "https://api.ryukomik.web.id";
+            const publicBase = "https://api.ryukomik.com";
             const cleanNav = (value) =>
               typeof value === "string"
                 ? value.replace(/\/?\?agc_[a-z]+=1$/i, "").replace(/\/+$/, "")
