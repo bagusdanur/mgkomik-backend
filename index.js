@@ -5884,6 +5884,8 @@ require("./mgeko")(app, { getCache, setCache, coalescedScrape, getImageCache, se
 require("./lua")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 require("./mgread")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 require("./mist")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
+// MangaDex memakai API resmi (bukan scraping), dipakai downloader RAW Scanlator.
+require("./mangadex")(app, { getCache, setCache, coalescedScrape, getImageCache, setImageCache });
 
 app.listen(PORT, () =>
   console.log(`🚀 Server jalan di http://localhost:${PORT}`),
