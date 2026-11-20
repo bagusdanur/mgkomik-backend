@@ -31,6 +31,19 @@ function luvyaaHeaders(referer = LUVYAA_BASE_URL + "/") {
 
 const cloudscraper = require("cloudscraper");
 
+// Logging verbose dinonaktifkan secara default (hemat CPU & I/O).
+// Set VERBOSE_SCRAPE_LOG=1 untuk mengaktifkan.
+function vlog(...args) {
+  if (process.env.VERBOSE_SCRAPE_LOG === "1") console.log(...args);
+}
+
+// Pangkas pesan error agar body HTML besar tidak ikut masuk ke log.
+function shortErrMsg(err, max = 120) {
+  const msg = String(err?.message || err || "").replace(/\s+/g, " ").trim();
+  return msg.length > max ? msg.slice(0, max) + "..." : msg;
+}
+
+
 function isCloudflareChallenge(html = "") {
   return /Just a moment|cf_chl|challenge-platform|Enable JavaScript and cookies/i.test(
     String(html),
@@ -63,7 +76,9 @@ async function luvyaaFetch(url, options = {}) {
     }
     errors.push("cloudscraper:cloudflare-challenge");
   } catch (err) {
-    errors.push(`cloudscraper:${err.message}`);
+    // Jangan simpan err.message mentah: cloudscraper menyisipkan seluruh body HTML
+    // (puluhan KB) ke dalamnya, sehingga log error membengkak dan memakan I/O.
+    errors.push(`cloudscraper:${err.response?.status || err.code || shortErrMsg(err)}`);
   }
 
   // Strategi 3: Worker proxy (akunncoc992)
@@ -73,7 +88,7 @@ async function luvyaaFetch(url, options = {}) {
       const workerUrl = `${WORKER_PROXY}${WORKER_PROXY.includes("?") ? "&" : "?"}url=${encodeURIComponent(fullUrl)}&referer=${encodeURIComponent(LUVYAA_BASE_URL + "/")}`;
       const { data } = await axios.get(workerUrl, { timeout });
       if (typeof data === "string" && !isCloudflareChallenge(data)) {
-        console.log(`[Luvyaa] ✅ Worker proxy berhasil untuk ${fullUrl}`);
+        vlog(`[Luvyaa] ✅ Worker proxy berhasil untuk ${fullUrl}`);
         return data;
       }
       errors.push("worker:cloudflare-challenge");
@@ -88,7 +103,14 @@ async function luvyaaFetch(url, options = {}) {
 
 function extractSlugFromUrl(url = "") {
   if (!url) return "";
-  return url.replace(LUVYAA_BASE_URL, "").replace(/^\/|\/$/g, "");
+  try {
+    // Tahan perpindahan versi host (v4 -> v5 -> v6, dst).
+    // Ambil pathname dari URL apa pun, lalu buang slash ujung.
+    const u = new URL(url, LUVYAA_BASE_URL);
+    return u.pathname.replace(/^\/+|\/+$/g, "");
+  } catch {
+    return url.replace(LUVYAA_BASE_URL, "").replace(/^\/|\/$/g, "");
+  }
 }
 
 function extractTypeFromClass(el, $) {
@@ -161,7 +183,7 @@ async function scrapeLuvyaaPustaka({ page = 1 } = {}) {
         ? "https://v5.luvyaa.co/"
         : `https://v5.luvyaa.co/page/${page}/`;
 
-    console.log("🌸 Luvyaa pustaka URL:", url);
+    vlog("🌸 Luvyaa pustaka URL:", url);
 
     const html = await luvyaaFetch(url);
     const $ = cheerio.load(html);
@@ -254,7 +276,7 @@ async function scrapeLuvyaaPustaka({ page = 1 } = {}) {
 
 async function scrapeLuvyaaDetail(url) {
   try {
-    console.log("🌸 Luvyaa detail URL:", url);
+    vlog("🌸 Luvyaa detail URL:", url);
     const html = await luvyaaFetch(url, { referer: LUVYAA_BASE_URL + "/" });
     const $ = cheerio.load(html);
 
@@ -362,7 +384,7 @@ async function scrapeLuvyaaDetail(url) {
 
 async function scrapeLuvyaaChapter(url) {
   try {
-    console.log("🌸 Luvyaa chapter URL:", url);
+    vlog("🌸 Luvyaa chapter URL:", url);
     const html = await luvyaaFetch(url, { referer: LUVYAA_BASE_URL + "/" });
     const $ = cheerio.load(html);
 
@@ -433,7 +455,7 @@ async function scrapeLuvyaaChapter(url) {
 async function scrapeLuvyaaSearch(query) {
   try {
     const searchUrl = `${LUVYAA_BASE_URL}/?s=${encodeURIComponent(query)}`;
-    console.log("🌸 Luvyaa search URL:", searchUrl);
+    vlog("🌸 Luvyaa search URL:", searchUrl);
 
     const html = await luvyaaFetch(searchUrl, { referer: LUVYAA_BASE_URL + "/" });
     const $ = cheerio.load(html);
@@ -677,7 +699,7 @@ module.exports = function registerLuvyaaRoutes(app, { getCache, setCache, coales
             errors.push("cloudscraper:response-terlalu-kecil");
           }
         } catch (err) {
-          errors.push(`cloudscraper:${err.message}`);
+          errors.push(`cloudscraper:${err.response?.status || err.code || shortErrMsg(err)}`);
         }
       }
 
@@ -738,7 +760,7 @@ module.exports = function registerLuvyaaRoutes(app, { getCache, setCache, coales
 
     const cached = getCache(cacheKey);
     if (cached) {
-      console.log(`⚡ [Cache Hit] ${cacheKey}`);
+      vlog(`⚡ [Cache Hit] ${cacheKey}`);
       return res.json(cached);
     }
 
@@ -783,7 +805,7 @@ module.exports = function registerLuvyaaRoutes(app, { getCache, setCache, coales
     const cacheKey = `luvyaa:detail:${slug}`;
     const cached = getCache(cacheKey);
     if (cached) {
-      console.log(`⚡ [Cache Hit] ${cacheKey}`);
+      vlog(`⚡ [Cache Hit] ${cacheKey}`);
       return res.json(cached);
     }
 
@@ -814,7 +836,7 @@ module.exports = function registerLuvyaaRoutes(app, { getCache, setCache, coales
 
     const cached = getCache(cacheKey);
     if (cached) {
-      console.log(`⚡ [Cache Hit] ${cacheKey}`);
+      vlog(`⚡ [Cache Hit] ${cacheKey}`);
       return res.json(cached);
     }
 
@@ -842,7 +864,7 @@ module.exports = function registerLuvyaaRoutes(app, { getCache, setCache, coales
     const cacheKey = "luvyaa:filters";
     const cached = getCache(cacheKey);
     if (cached) {
-      console.log(`⚡ [Cache Hit] ${cacheKey}`);
+      vlog(`⚡ [Cache Hit] ${cacheKey}`);
       return res.json(cached);
     }
 
@@ -867,7 +889,7 @@ module.exports = function registerLuvyaaRoutes(app, { getCache, setCache, coales
       const cacheKey = `luvyaa:pustaka-filter:o:${orderby}:t:${tipe}:g:${genre}:g2:${genre2}:s:${status}:p:${page}`;
       const cached = getCache(cacheKey);
       if (cached) {
-        console.log(`⚡ [Cache Hit] ${cacheKey}`);
+        vlog(`⚡ [Cache Hit] ${cacheKey}`);
         return res.json(cached);
       }
 
@@ -899,7 +921,7 @@ module.exports = function registerLuvyaaRoutes(app, { getCache, setCache, coales
     const cacheKey = `luvyaa:search:${q}`;
     const cached = getCache(cacheKey);
     if (cached) {
-      console.log(`⚡ [Cache Hit] ${cacheKey}`);
+      vlog(`⚡ [Cache Hit] ${cacheKey}`);
       return res.json(cached);
     }
 
