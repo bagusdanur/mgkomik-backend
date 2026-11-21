@@ -1280,17 +1280,81 @@ async function scrapeKiryuuChapter(url) {
 // =======================================================
 // 📖 SCRAPER: TERBARU KOMIK - KOMIKU
 // =======================================================
+
+// komiku.org dilindungi Cloudflare "Attention Required" yang memblokir IP
+// datacenter (axios & cloudscraper sama-sama 403). Pola sama seperti meio:
+//   proxy worker (tembus) -> direct axios -> cloudscraper.
+const KOMIKU_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+  Accept:
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+  "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
+  Referer: "https://komiku.org/",
+};
+
+function komikuProxyUrl(url) {
+  if (!MEIO_PROXY_URL) return "";
+  const separator = MEIO_PROXY_URL.includes("?") ? "" : "?url=";
+  return `${MEIO_PROXY_URL}${separator}${encodeURIComponent(url)}&referer=${encodeURIComponent("https://komiku.org/")}`;
+}
+
+async function komikuFetch(url, options = {}) {
+  const perAttemptTimeout = options.timeout || 20000;
+  const totalBudget = options.totalTimeout || 30000;
+  const headers = { ...KOMIKU_HEADERS, ...(options.headers || {}) };
+
+  const attempts = [];
+  const proxiedUrl = komikuProxyUrl(url);
+  if (proxiedUrl) {
+    attempts.push({
+      label: "proxy",
+      run: async (timeout) => {
+        const { data } = await axios.get(proxiedUrl, { headers, timeout });
+        return data;
+      },
+    });
+  }
+  attempts.push({
+    label: "direct",
+    run: async (timeout) => {
+      const { data } = await axios.get(url, { headers, timeout, maxRedirects: 5 });
+      return data;
+    },
+  });
+  attempts.push({
+    label: "cloudscraper",
+    run: async (timeout) => cloudscraper.request({ uri: url, method: "GET", headers, timeout }),
+  });
+
+  const errors = [];
+  const startedAt = Date.now();
+  for (const attempt of attempts) {
+    const elapsed = Date.now() - startedAt;
+    if (elapsed >= totalBudget) {
+      errors.push(`${attempt.label}:skipped-budget-exceeded`);
+      continue;
+    }
+    const attemptTimeout = Math.min(perAttemptTimeout, totalBudget - elapsed);
+    try {
+      const html = await attempt.run(attemptTimeout);
+      if (typeof html === "string" && html.length > 500 && !/Attention Required|Just a moment/i.test(html.slice(0, 2000))) {
+        return html;
+      }
+      errors.push(`${attempt.label}:blocked-or-empty`);
+    } catch (err) {
+      errors.push(`${attempt.label}:${String(err.message).slice(0, 80)}`);
+    }
+  }
+  throw new Error(`Komiku fetch gagal (${errors.join("; ")})`);
+}
+
 async function scrapeKomikuTerbaru() {
   try {
     const url = "https://komiku.org/";
     vlog(`🕷️ Mengambil data dari ${url}...`);
 
-    const { data } = await axios.get(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-      },
-    });
+    const data = await komikuFetch(url);
 
     const $ = cheerio.load(data);
     const results = [];
@@ -1366,12 +1430,7 @@ async function scrapeKomikuTerbaru() {
 async function scrapeKomikuPopuler(tipe = "semua") {
   try {
     const url = "https://komiku.org/";
-    const { data } = await axios.get(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-      },
-    });
+    const data = await komikuFetch(url);
 
     const $ = cheerio.load(data);
     const results = [];
@@ -1440,12 +1499,7 @@ async function scrapeKomikuPopuler(tipe = "semua") {
 // =======================================================
 async function scrapeKomikuDetail(url) {
   try {
-    const { data } = await axios.get(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-      },
-    });
+    const data = await komikuFetch(url);
 
     const $ = cheerio.load(data);
 
@@ -1530,12 +1584,7 @@ async function scrapeKomikuDetail(url) {
 // =======================================================
 async function scrapeKomikuChapter(url) {
   try {
-    const { data } = await axios.get(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
-      },
-    });
+    const data = await komikuFetch(url);
 
     const $ = cheerio.load(data);
     const normalizeKomikuSlug = (value = "") =>
@@ -1621,12 +1670,7 @@ async function scrapeKomikuList({ page = 1, huruf = null, tipe = null } = {}) {
     "https://komiku.org/daftar-komik/" +
     (params.toString() ? "?" + params.toString() : "");
 
-  const { data } = await axios.get(url, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    },
-  });
+  const data = await komikuFetch(url);
 
   const $ = cheerio.load(data);
 
@@ -1726,12 +1770,7 @@ async function scrapeGenreKomiku(genre, page = 1) {
         ? `https://api.komiku.org/genre/${genre}/`
         : `https://api.komiku.org/genre/${genre}/page/${page}/`;
 
-    const { data } = await axios.get(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
-      },
-    });
+    const data = await komikuFetch(url);
 
     const $ = cheerio.load(data);
     const results = [];
@@ -1779,13 +1818,7 @@ async function scrapeKomikuPustaka(page = 1) {
         ? "https://api.komiku.org/manga/"
         : `https://api.komiku.org/manga/page/${page}/`;
 
-    const { data } = await axios.get(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-      },
-      timeout: 10000,
-    });
+    const data = await komikuFetch(url);
 
     const $ = cheerio.load(data);
     const results = [];
@@ -1850,11 +1883,7 @@ async function scrapeKomikuFilters() {
   try {
     const url = "https://komiku.org/pustaka/";
 
-    const { data } = await axios.get(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-      },
-    });
+    const data = await komikuFetch(url);
 
     const $ = cheerio.load(data);
 
@@ -1916,10 +1945,7 @@ async function scrapeKomikuPustakaFilter({
 
     vlog("🔥 URL:", url);
 
-    const { data } = await axios.get(url, {
-      headers: { "User-Agent": "Mozilla/5.0" },
-      timeout: 10000,
-    });
+    const data = await komikuFetch(url);
 
     const $ = cheerio.load(data);
     const results = [];
@@ -4191,13 +4217,7 @@ app.get("/komiku/search", async (req, res) => {
   try {
     const responseData = await coalescedScrape(cacheKey, async () => {
       const url = `https://api.komiku.org/?post_type=manga&s=${encodeURIComponent(q)}`;
-      const { data } = await axios.get(url, {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        },
-        timeout: 9000,
-      });
+      const data = await komikuFetch(url, { timeout: 9000 });
 
       const $ = cheerio.load(data);
       const results = [];
@@ -4831,6 +4851,9 @@ async function fetchKomikuImage(imageUrl) {
     } catch (err) {
       lastError = err;
       const status = err.response?.status;
+      // 403 dari komiku.org = blokir Cloudflare (bukan file hilang).
+      // Jangan langsung lempar; coba proxy worker dulu di bawah.
+      if (status === 403) break;
       if (typeof status === "number" && status >= 400 && status < 500) {
         throw err;
       }
@@ -4839,6 +4862,27 @@ async function fetchKomikuImage(imageUrl) {
       // tetap terjangkau, cuma sedang bermasalah.
       if (!status) {
         komikuImageHostMarkDead(targetHost);
+      }
+    }
+  }
+
+  // Fallback proxy worker: komiku.org memblokir IP datacenter (403), tapi
+  // worker proxy mengembalikan byte gambar asli. Coba host asal lalu mirror.
+  if (MEIO_PROXY_URL) {
+    for (const target of allCandidates.slice(0, KOMIKU_IMAGE_MAX_ATTEMPTS)) {
+      try {
+        const sep = MEIO_PROXY_URL.includes("?") ? "" : "?url=";
+        const proxied = `${MEIO_PROXY_URL}${sep}${encodeURIComponent(target)}&referer=${encodeURIComponent("https://komiku.org/")}`;
+        const response = await axios.get(proxied, {
+          responseType: "stream",
+          timeout: 15000,
+          headers: { Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8" },
+        });
+        const ct = response.headers["content-type"] || "";
+        if (ct.startsWith("image/")) return response;
+        response.data.destroy?.();
+      } catch (err) {
+        lastError = err;
       }
     }
   }
