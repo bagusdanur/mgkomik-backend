@@ -1122,6 +1122,17 @@ function absoluteAnichinUrl(src, base = activeAnichinBase) {
 // Semua page (1, 2, 3, dst) selalu render hothome + latesthome
 // Fix: SELALU pakai .releases.latesthome sebagai container anchor
 // ─────────────────────────────────────────────────────────────────────────────
+// URL Anichin untuk seri memakai /anime/<slug-seri>/, sedangkan item daftar
+// ("terbaru") menautkan ke episode: <slug-seri>-episode-13-subtitle-indonesia.
+// Detail yang dipanggil dengan slug episode dulu diterima sebagai halaman seri
+// (punya entry-title + infox) sehingga episodeList selalu kosong.
+function anichinSeriesSlug(slug) {
+  return String(slug || "")
+    .trim()
+    .replace(/\/$/, "")
+    .replace(/-episode-\d+.*$/i, "");
+}
+
 async function scrapeAnichinTerbaru(page = 1) {
   try {
     const path = page <= 1 ? "/" : `/page/${page}/`;
@@ -1179,6 +1190,7 @@ async function scrapeAnichinTerbaru(page = 1) {
         title,
         episodeTitle,
         slug,
+        series_slug: anichinSeriesSlug(slug),
         url: href,
         thumbnail,
         type,
@@ -1382,8 +1394,7 @@ async function fetchAnichinSeriPage(slug) {
       const out = await fetchAnichinUrl(path);
       const html = out.res.data;
       // Tolak hasil yang jelas-jelas homepage (bukan halaman seri).
-      const isSeriesPage =
-        /entry-title/.test(html) && /eplister|thumbook|infox/.test(html);
+      const isSeriesPage = /entry-title/.test(html) && /eplister/.test(html);
       if (!isSeriesPage) {
         console.log(`⚠️ Anichin ${path} bukan halaman seri (redirect ke homepage?), coba path berikutnya`);
         continue;
@@ -1400,7 +1411,10 @@ async function fetchAnichinSeriPage(slug) {
 
 async function scrapeAnichinSeri(slug) {
   try {
-    const { res } = await fetchAnichinSeriPage(slug);
+    // Kalau yang dikirim slug episode, pakai slug serinya agar halaman yang
+    // diambil benar-benar halaman seri (punya .eplister).
+    const seriesSlug = anichinSeriesSlug(slug);
+    const { res } = await fetchAnichinSeriPage(seriesSlug || slug);
     const $ = cheerio.load(res.data);
  
     // ── THUMBNAIL ─────────────────────────────────────────────────────────
@@ -1571,6 +1585,7 @@ async function scrapeAnichinSearch(query, page = 1) {
         title,
         episodeTitle,
         slug,
+        series_slug: anichinSeriesSlug(slug),
         url: href,
         thumbnail,
         type,
