@@ -2661,7 +2661,7 @@ async function sekteFetch(url) {
       "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
       Referer: SEKTE_BASE_URL,
     },
-    timeout: 20000,
+    timeout: 8000,
   });
 
   return data;
