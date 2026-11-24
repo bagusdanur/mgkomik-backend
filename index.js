@@ -2566,7 +2566,8 @@ async function probeDoujindesuChapterImages(seriesTitle, chapterTitle) {
 }
 
 const SEKTE_BASE_URL = "https://sektedoujin.cc";
-const SEKTE_PROXY_URL = "https://proxy.kopipaitboskuh.workers.dev/?url=";
+const SEKTE_PROXY_URL = process.env.SEKTE_PROXY_URL || "https://proxy.kopipaitboskuh.workers.dev/?url=";
+const SEKTE_PROXY_ALT_URL = "https://proxy.akunncoc992.workers.dev/?url=";
 
 function sekteUrl(path = "/") {
   if (!path) return "";
@@ -2650,21 +2651,48 @@ function parseSekteReaderData(html = "") {
   }
 }
 
+function isSekteChallenge(html) {
+  if (typeof html !== "string" || html.length < 500) return true;
+  return (
+    html.includes("<title>Just a moment") ||
+    html.includes("_cf_chl_opt") ||
+    html.includes("Enable JavaScript and cookies to continue")
+  );
+}
+
 async function sekteFetch(url) {
   const targetUrl = sekteUrl(url);
-  const proxyUrl = `${SEKTE_PROXY_URL}${encodeURIComponent(targetUrl)}`;
-  const { data } = await axios.get(proxyUrl, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
-      Referer: SEKTE_BASE_URL,
-    },
-    timeout: 8000,
-  });
+  const headers = {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
+    Referer: SEKTE_BASE_URL,
+  };
 
-  return data;
+  const candidates = [
+    { label: "direct", url: targetUrl },
+    { label: "worker", url: `${SEKTE_PROXY_URL}${encodeURIComponent(targetUrl)}` },
+    { label: "worker-alt", url: `${SEKTE_PROXY_ALT_URL}${encodeURIComponent(targetUrl)}` },
+  ];
+
+  let lastError = null;
+  for (const candidate of candidates) {
+    try {
+      const { data } = await axios.get(candidate.url, {
+        headers,
+        timeout: 8000,
+      });
+      if (!isSekteChallenge(data)) {
+        return data;
+      }
+      lastError = new Error(`Sekte ${candidate.label} blocked/challenge`);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error("Sekte fetch gagal");
 }
 
 function parseSekteListItems($) {
