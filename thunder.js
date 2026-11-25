@@ -5,12 +5,37 @@ const cheerio = require("cheerio");
 
 const BASE = "https://en-thunderscans.com";
 const PROXY_URL = process.env.THUNDER_PROXY_URL || "https://proxy.kopipaitboskuh.workers.dev/?url=";
+const PROXY_ALT_URL = process.env.THUNDER_PROXY_ALT_URL || "https://proxy.akunncoc992.workers.dev/?url=";
 const IMAGE_HOSTS = new Set(["en-thunderscans.com", "www.en-thunderscans.com", "i.ibb.co"]);
 const PAGE_SIZE = 24;
 let catalogCache = { expires: 0, data: null, pending: null };
 
 function clean(value, fallback = "") {
   return String(value ?? "").replace(/\s+/g, " ").trim() || fallback;
+}
+
+function isCloudflareChallenge(body) {
+  if (typeof body !== "string") return false;
+  return (
+    body.includes("<title>Just a moment") ||
+    body.includes("_cf_chl_opt") ||
+    body.includes("cf_chl_opt=") ||
+    body.includes('name="cf_chl_') ||
+    body.includes("Enable JavaScript and cookies to continue")
+  );
+}
+
+function isWorkerError(body) {
+  return typeof body === "string" && body.includes("Host tidak diizinkan");
+}
+
+function buildFetchCandidates(url) {
+  const candidates = [{ name: "direct", target: url }];
+  const proxies = [PROXY_URL, PROXY_ALT_URL].filter((p, i, arr) => p && arr.indexOf(p) === i);
+  proxies.forEach((proxy, idx) => {
+    candidates.push({ name: idx === 0 ? "worker" : "worker-alt", target: `${proxy}${encodeURIComponent(url)}` });
+  });
+  return candidates;
 }
 
 function headers(referer = `${BASE}/`) {
@@ -24,19 +49,40 @@ function headers(referer = `${BASE}/`) {
 
 async function thunderFetch(path, options = {}) {
   const url = path.startsWith("http") ? path : `${BASE}${path.startsWith("/") ? "" : "/"}${path}`;
-  const fetchUrl = `${PROXY_URL}${encodeURIComponent(url)}`;
-  const response = await axios.get(fetchUrl, {
-    headers: headers(options.referer),
-    timeout: options.timeout || 25000,
-    responseType: options.responseType || "text",
-    validateStatus: (status) => status >= 200 && status < 500,
-  });
-  if (response.status < 200 || response.status >= 300) {
-    const error = new Error(`Thunder upstream HTTP ${response.status}`);
-    error.status = response.status;
-    throw error;
+  const candidates = buildFetchCandidates(url);
+  const responseType = options.responseType || "text";
+  const timeout = options.timeout || 15000;
+  let lastError = null;
+
+  for (const candidate of candidates) {
+    try {
+      const response = await axios.get(candidate.target, {
+        headers: headers(options.referer),
+        timeout,
+        responseType,
+        validateStatus: (status) => status >= 200 && status < 600,
+      });
+      if (response.status >= 200 && response.status < 300) {
+        if (responseType === "text" && (isCloudflareChallenge(response.data) || isWorkerError(response.data))) {
+          lastError = new Error(`Thunder ${candidate.name} challenged/blocked`);
+          lastError.status = 403;
+          continue;
+        }
+        return response.data;
+      }
+      if (candidate.name === "direct" && (response.status === 404 || response.status === 410)) {
+        const notFound = new Error(`Thunder upstream HTTP ${response.status}`);
+        notFound.status = response.status;
+        throw notFound;
+      }
+      lastError = new Error(`Thunder ${candidate.name} HTTP ${response.status}`);
+      lastError.status = response.status;
+    } catch (err) {
+      if (err.status === 404 || err.status === 410) throw err;
+      lastError = err;
+    }
   }
-  return response.data;
+  throw lastError || new Error("Thunder upstream gagal");
 }
 
 function pathSlug(value = "", prefix = "") {
@@ -287,26 +333,41 @@ module.exports = function registerThunder(app, { getCache, setCache, coalescedSc
       const imageUrl = normalizeImage(req.query.url);
       const parsed = new URL(imageUrl);
       if (parsed.protocol !== "https:" || !IMAGE_HOSTS.has(parsed.hostname.toLowerCase())) return res.status(400).send("URL gambar Thunder tidak valid");
-      const cached = getImageCache(imageUrl || url);
+      const cached = getImageCache(imageUrl);
       if (cached) {
-        return res.set('Content-Type', cached.contentType).set('Cache-Control', 'public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800').send(cached.buffer);
+        return res.set("Content-Type", cached.contentType).set("Cache-Control", "public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800").send(cached.buffer);
       }
-      const needsProxy = parsed.hostname.toLowerCase().includes("thunderscans.com");
-      const targetUrl = needsProxy ? `${PROXY_URL}${encodeURIComponent(imageUrl)}` : imageUrl;
-      const response = await axios.get(targetUrl, { headers: headers(BASE), responseType: "stream", timeout: 25000 });
-      res.set({ "Content-Type": response.headers["content-type"] || "image/jpeg", ...(response.headers["content-length"] ? { "Content-Length": response.headers["content-length"] } : {}), "Cache-Control": "public, max-age=31536000" });
-      const chunks = [];
-      response.data.on('data', c => chunks.push(c));
-      response.data.on('end', () => {
-        const buf = Buffer.concat(chunks);
-        setImageCache(imageUrl || url, buf, response.headers['content-type'] || 'image/jpeg');
-        res.set('Content-Type', response.headers['content-type'] || 'image/jpeg');
-        res.set('Cache-Control', 'public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800');
-        res.send(buf);
-      });
+      const candidates = parsed.hostname.toLowerCase().includes("thunderscans.com")
+        ? buildFetchCandidates(imageUrl)
+        : [{ name: "direct", target: imageUrl }];
+      let lastError = null;
+      for (const candidate of candidates) {
+        try {
+          const response = await axios.get(candidate.target, {
+            headers: headers(BASE),
+            responseType: "arraybuffer",
+            timeout: 15000,
+            validateStatus: (status) => status >= 200 && status < 600,
+          });
+          const ct = String(response.headers["content-type"] || "");
+          if (response.status >= 200 && response.status < 300 && ct.startsWith("image/")) {
+            const buf = Buffer.from(response.data);
+            setImageCache(imageUrl, buf, ct);
+            return res.set("Content-Type", ct).set("Cache-Control", "public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800").send(buf);
+          }
+          if (candidate.name === "direct" && (response.status === 404 || response.status === 410)) {
+            return res.status(response.status).send("Gambar Thunder tidak ditemukan");
+          }
+          lastError = new Error(`Thunder image ${candidate.name} HTTP ${response.status} (${ct || "no-ct"})`);
+          lastError.status = response.status;
+        } catch (err) {
+          lastError = err;
+        }
+      }
+      throw lastError || new Error("Gagal mengambil gambar Thunder");
     } catch (error) {
       console.error(`[Thunder Proxy Error] ${error.message}`);
-      res.status(error.response?.status || 502).send("Gagal mengambil gambar Thunder");
+      res.status(error.status || error.response?.status || 502).send("Gagal mengambil gambar Thunder");
     }
   });
 
@@ -314,11 +375,12 @@ module.exports = function registerThunder(app, { getCache, setCache, coalescedSc
     const page = parsePage(req.query.page || "1");
     if (!page) return res.status(400).json({ success: false, message: "Page tidak valid" });
     const key = `thunder:pustaka:${page}`, cached = getCache(key);
-    if (cached) return res.json(cached);
+    if (cached) return res.json(rewriteImages(cached, req));
     try {
       const result = await coalescedScrape(key, () => scrapePustaka(page));
-      const response = { success: true, source: "en-thunderscans.com", page, total: result.data.length, meta: result.meta, data: rewriteImages(result.data, req) };
-      setCache(key, response, 120); res.json(response);
+      const raw = { success: true, source: "en-thunderscans.com", page, total: result.data.length, meta: result.meta, data: result.data };
+      setCache(key, raw, 120);
+      res.json(rewriteImages(raw, req));
     } catch (error) { console.error(`[Thunder Pustaka Error] ${error.message}`); res.status(502).json({ success: false, page, total: 0, data: [], message: error.message }); }
   });
 
@@ -326,11 +388,12 @@ module.exports = function registerThunder(app, { getCache, setCache, coalescedSc
     const page = parsePage(req.query.page || "1");
     if (!page) return res.status(400).json({ success: false, message: "Page tidak valid" });
     const key = `thunder:latest:${page}`, cached = getCache(key);
-    if (cached) return res.json(cached);
+    if (cached) return res.json(rewriteImages(cached, req));
     try {
       const result = await coalescedScrape(key, () => scrapeLatest(page));
-      const response = { success: true, source: "en-thunderscans.com", order: "latest", page, total: result.data.length, meta: result.meta, data: rewriteImages(result.data, req) };
-      setCache(key, response, 120); res.json(response);
+      const raw = { success: true, source: "en-thunderscans.com", order: "latest", page, total: result.data.length, meta: result.meta, data: result.data };
+      setCache(key, raw, 120);
+      res.json(rewriteImages(raw, req));
     } catch (error) { console.error(`[Thunder Latest Error] ${error.message}`); res.status(502).json({ success: false, page, total: 0, data: [], message: error.message }); }
   });
 
@@ -339,27 +402,36 @@ module.exports = function registerThunder(app, { getCache, setCache, coalescedSc
     if (!query) return res.status(400).json({ success: false, message: "Masukkan parameter ?q=" });
     if (!page) return res.status(400).json({ success: false, message: "Page tidak valid" });
     const key = `thunder:search:${query.toLowerCase()}:${page}`, cached = getCache(key);
-    if (cached) return res.json(cached);
-    try { const result = await coalescedScrape(key, () => scrapeSearch(query, page)); result.data = rewriteImages(result.data, req); setCache(key, result, 300); res.json(result); }
-    catch (error) { console.error(`[Thunder Search Error] ${error.message}`); res.status(502).json({ success: false, query, data: [], message: error.message }); }
+    if (cached) return res.json(rewriteImages(cached, req));
+    try {
+      const result = await coalescedScrape(key, () => scrapeSearch(query, page));
+      setCache(key, result, 300);
+      res.json(rewriteImages(result, req));
+    } catch (error) { console.error(`[Thunder Search Error] ${error.message}`); res.status(502).json({ success: false, query, data: [], message: error.message }); }
   });
 
   app.get("/thunder/detail/:slug", async (req, res) => {
     const slug = pathSlug(req.params.slug, "comics");
     if (!slug) return res.status(400).json({ success: false, message: "Slug tidak diberikan" });
     const key = `thunder:detail:${slug}`, cached = getCache(key);
-    if (cached) return res.json(cached);
-    try { const result = rewriteImages(await coalescedScrape(key, () => scrapeDetail(slug)), req); setCache(key, result, 900); res.json(result); }
-    catch (error) { console.error(`[Thunder Detail Error] ${slug}: ${error.message}`); res.status(error.status === 404 ? 404 : 502).json({ success: false, message: error.message }); }
+    if (cached) return res.json(rewriteImages(cached, req));
+    try {
+      const result = await coalescedScrape(key, () => scrapeDetail(slug));
+      setCache(key, result, 900);
+      res.json(rewriteImages(result, req));
+    } catch (error) { console.error(`[Thunder Detail Error] ${slug}: ${error.message}`); res.status(error.status === 404 ? 404 : 502).json({ success: false, message: error.message }); }
   });
 
   app.get("/thunder/chapter/:seriesSlug/:chapterSlug", async (req, res) => {
     const seriesSlug = pathSlug(req.params.seriesSlug, "comics"), chapterSlug = pathSlug(req.params.chapterSlug);
     if (!seriesSlug || !chapterSlug) return res.status(400).json({ success: false, message: "Slug chapter tidak lengkap" });
     const key = `thunder:chapter:${seriesSlug}:${chapterSlug}`, cached = getCache(key);
-    if (cached) return res.json(cached);
-    try { const result = rewriteImages(await coalescedScrape(key, () => scrapeChapter(seriesSlug, chapterSlug)), req); setCache(key, result, 7200); res.json(result); }
-    catch (error) { console.error(`[Thunder Chapter Error] ${seriesSlug}/${chapterSlug}: ${error.message}`); res.status(error.status === 404 ? 404 : 502).json({ success: false, message: error.message }); }
+    if (cached) return res.json(rewriteImages(cached, req));
+    try {
+      const result = await coalescedScrape(key, () => scrapeChapter(seriesSlug, chapterSlug));
+      setCache(key, result, 7200);
+      res.json(rewriteImages(result, req));
+    } catch (error) { console.error(`[Thunder Chapter Error] ${seriesSlug}/${chapterSlug}: ${error.message}`); res.status(error.status === 404 ? 404 : 502).json({ success: false, message: error.message }); }
   });
 
   console.log("Thunder routes registered: /thunder/pustaka, /thunder/latest, /thunder/search, /thunder/detail/:slug, /thunder/chapter/:seriesSlug/:chapterSlug, /thunder/image");
