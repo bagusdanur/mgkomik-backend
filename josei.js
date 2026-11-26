@@ -2,6 +2,7 @@
 
 const axios = require("axios");
 const cheerio = require("cheerio");
+const sharp = require("sharp");
 
 const BASE = "https://rosyscans.com";
 const PROXY_URL = process.env.JOSEI_PROXY_URL || "https://proxy.kopipaitboskuh.workers.dev/?url=";
@@ -29,6 +30,212 @@ function isAllowedImageUrl(parsed) {
 const PAGE_SIZE = 24;
 let catalogCache = { expires: 0, data: null, pending: null };
 let metadataCache = { expires: 0, data: null, pending: null };
+
+// ── RosyScans anti-scraper shield (decoy filter + watermark patch compositor) ──
+const SHIELD_SECRET = "r0sy_sh1eld_9472_k9x";
+const PATCH_SECRETS = ["r0sy_v2_k7p9_3418_q4x", "r0sy_p4tch_8831_m7z"];
+const SHIELD_MOD = 89;
+const SHIELD_MIN_V = 1760000000;
+const ROSY_IMG_RE = /uploads\/manga-images\/(\d+)\/([^/?#]+)\/([^/?#]+)/i;
+const PATCH_CACHE_TTL_MS = 30 * 60 * 1000;
+const PATCH_CACHE_MAX = 20;
+const patchMapCache = new Map();
+const patchMapInflight = new Map();
+
+function fnv1a32(str) {
+  let h = 0x811c9dc5 >>> 0;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h >>> 0;
+}
+
+function xorshift32(seed) {
+  let x = seed >>> 0;
+  if (x === 0) x = 0x9e3779b9 >>> 0;
+  x = (x ^ ((x << 13) >>> 0)) >>> 0;
+  x = (x ^ (x >>> 17)) >>> 0;
+  x = (x ^ ((x << 5) >>> 0)) >>> 0;
+  return x >>> 0;
+}
+
+function decoySingleIndices(seriesId, chapterNum, total) {
+  if (total < 8) return [];
+  const k = Math.min(6, Math.max(2, Math.floor(total / 8)));
+  const start = 1;
+  const end = total - 2;
+  const span = end - start + 1;
+  if (span < k) return [];
+  let seed = fnv1a32(`${SHIELD_SECRET}|${seriesId}|${chapterNum}|${total}`);
+  const out = [];
+  for (let i = 0; i < k; i++) {
+    const lo = start + Math.floor((i * span) / k);
+    let hi = start + Math.floor(((i + 1) * span) / k) - 1;
+    if (hi < lo) hi = lo;
+    const width = hi - lo + 1;
+    seed = xorshift32(seed);
+    out.push(lo + (seed % width));
+  }
+  return out;
+}
+
+function decoyBlockIndices(seriesId, chapterNum, total, blockSize, tag, t2, t3, t4) {
+  let blocks = 0;
+  if (total >= t4) blocks = 4;
+  else if (total >= t3) blocks = 3;
+  else if (total >= t2) blocks = 2;
+  if (blocks <= 0) return [];
+  const remaining = total - blocks * blockSize;
+  if (remaining < blocks + 1) return [];
+  const start = 1;
+  const end = remaining - 1;
+  const span = end - start + 1;
+  let seed = fnv1a32(`${SHIELD_SECRET}|${tag}|${seriesId}|${chapterNum}|${total}`);
+  const out = [];
+  for (let i = 0; i < blocks; i++) {
+    const lo = start + Math.floor((i * span) / blocks);
+    let hi = start + Math.floor(((i + 1) * span) / blocks) - 1;
+    if (hi < lo) hi = lo;
+    const width = hi - lo + 1;
+    seed = xorshift32(seed);
+    const base = lo + (seed % width) + i * blockSize;
+    for (let off = 0; off < blockSize; off++) out.push(base + off);
+  }
+  return out;
+}
+
+function parseRosyImageMeta(url) {
+  const m = String(url || "").match(ROSY_IMG_RE);
+  if (!m) return null;
+  const vm = String(url || "").match(/[?&]v=(\d+)/);
+  const v = vm ? Number.parseInt(vm[1], 10) : 0;
+  return { seriesId: m[1], chapterNum: m[2], filename: m[3], v };
+}
+
+function filterRosyDecoys(images) {
+  if (!Array.isArray(images) || images.length === 0) return images;
+  let meta = null;
+  for (const url of images) {
+    const parsed = parseRosyImageMeta(url);
+    if (parsed && parsed.v >= SHIELD_MIN_V) {
+      meta = parsed;
+      break;
+    }
+  }
+  if (!meta) return images;
+  const rem = meta.v % SHIELD_MOD;
+  let decoys = [];
+  if (rem === 79 || rem === 71) {
+    decoys = decoyBlockIndices(meta.seriesId, meta.chapterNum, images.length, 16, "v3", 38, 64, 99);
+  } else if (rem === 53) {
+    decoys = decoyBlockIndices(meta.seriesId, meta.chapterNum, images.length, 8, "v2", 22, 40, 67);
+  } else if (rem === 37) {
+    decoys = decoySingleIndices(meta.seriesId, meta.chapterNum, images.length);
+  }
+  if (!decoys.length) return images;
+  const decoySet = new Set(decoys);
+  return images.filter((_, idx) => !decoySet.has(idx));
+}
+
+function decryptPatchBlob(b64, seriesId, chapterNum) {
+  const bin = Buffer.from(b64, "base64");
+  if (bin.length < 9) return null;
+  let nonce = "";
+  for (let n = 0; n < 8; n++) nonce += bin[n].toString(16).padStart(2, "0");
+  for (const secret of PATCH_SECRETS) {
+    try {
+      let s1 = fnv1a32(`${secret}|${seriesId}|${chapterNum}|${nonce}`);
+      let s2 = fnv1a32(`${nonce}|${chapterNum}|${secret}|${seriesId}`);
+      const out = Buffer.allocUnsafe(bin.length - 8);
+      let key = 0;
+      for (let i = 0; i < out.length; i++) {
+        if ((i & 3) === 0) {
+          s1 = xorshift32(s1);
+          s2 = xorshift32((s2 ^ s1) >>> 0);
+          key = (s1 ^ s2) >>> 0;
+        }
+        out[i] = bin[i + 8] ^ ((key >>> ((i & 3) * 8)) & 0xff);
+      }
+      const parsed = JSON.parse(out.toString("utf8"));
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch (_) {
+      // Coba secret berikutnya.
+    }
+  }
+  return null;
+}
+
+async function getRosyPatchMap(seriesId, chapterNum, v) {
+  const key = `${seriesId}/${chapterNum}?v=${v}`;
+  const cached = patchMapCache.get(key);
+  if (cached && cached.expires > Date.now()) return cached.data;
+  if (patchMapInflight.has(key)) return patchMapInflight.get(key);
+
+  const job = (async () => {
+    try {
+      const patchUrl = `https://img.rosyscans.id/uploads/manga-images/${seriesId}/${chapterNum}/patches.js?v=${v}`;
+      const { data } = await axios.get(patchUrl, {
+        headers: headers(`${BASE}/`),
+        responseType: "text",
+        timeout: 15000,
+      });
+      const m = typeof data === "string" ? data.match(/window\.__rsP\s*=\s*"([^"]+)"/) : null;
+      const pmap = m ? decryptPatchBlob(m[1], seriesId, chapterNum) : null;
+      if (patchMapCache.size >= PATCH_CACHE_MAX) {
+        const oldest = patchMapCache.keys().next().value;
+        if (oldest) patchMapCache.delete(oldest);
+      }
+      patchMapCache.set(key, { data: pmap, expires: Date.now() + PATCH_CACHE_TTL_MS });
+      return pmap;
+    } catch (error) {
+      console.warn(`[Josei Patch Warning] ${key}: ${error.message}`);
+      return null;
+    } finally {
+      patchMapInflight.delete(key);
+    }
+  })();
+
+  patchMapInflight.set(key, job);
+  return job;
+}
+
+async function applyRosyPatches(imageUrl, rawBuf, rawContentType) {
+  const meta = parseRosyImageMeta(imageUrl);
+  if (!meta || meta.v < SHIELD_MIN_V) return { buffer: rawBuf, contentType: rawContentType };
+  const rem = meta.v % SHIELD_MOD;
+  if (rem !== 79 && rem !== 83) return { buffer: rawBuf, contentType: rawContentType };
+
+  const pmap = await getRosyPatchMap(meta.seriesId, meta.chapterNum, meta.v);
+  const patches = pmap?.[meta.filename];
+  if (!Array.isArray(patches) || !patches.length) {
+    return { buffer: rawBuf, contentType: rawContentType };
+  }
+
+  try {
+    const imgMeta = await sharp(rawBuf).metadata();
+    if (!imgMeta.width || !imgMeta.height) return { buffer: rawBuf, contentType: rawContentType };
+    const composites = [];
+    for (const entry of patches) {
+      if (!Array.isArray(entry) || entry.length < 5) continue;
+      const [leftPct, topPct, widthPct, heightPct, b64] = entry;
+      const left = Math.max(0, Math.round((leftPct / 100) * imgMeta.width));
+      const top = Math.max(0, Math.round((topPct / 100) * imgMeta.height));
+      const width = Math.max(1, Math.min(imgMeta.width - left, Math.round((widthPct / 100) * imgMeta.width)));
+      const height = Math.max(1, Math.min(imgMeta.height - top, Math.round((heightPct / 100) * imgMeta.height)));
+      const patchBuf = await sharp(Buffer.from(b64, "base64"))
+        .resize(width, height, { fit: "fill" })
+        .toBuffer();
+      composites.push({ input: patchBuf, left, top });
+    }
+    if (!composites.length) return { buffer: rawBuf, contentType: rawContentType };
+    const cleanBuf = await sharp(rawBuf).composite(composites).webp({ quality: 85 }).toBuffer();
+    return { buffer: cleanBuf, contentType: "image/webp" };
+  } catch (error) {
+    console.warn(`[Josei Patch Composite Error] ${meta.filename}: ${error.message}`);
+    return { buffer: rawBuf, contentType: rawContentType };
+  }
+}
 
 function clean(value, fallback = "") {
   return String(value ?? "").replace(/\s+/g, " ").trim() || fallback;
@@ -133,7 +340,9 @@ function baseUrl(req) {
 
 function proxyImage(value, req) {
   const url = normalizeImage(value);
-  return url ? `${baseUrl(req)}/josei/image?url=${encodeURIComponent(url)}` : "";
+  if (!url) return "";
+  const extra = ROSY_IMG_RE.test(url) ? "&wm=1" : "";
+  return `${baseUrl(req)}/josei/image?url=${encodeURIComponent(url)}${extra}`;
 }
 
 function rewriteImages(payload, req) {
@@ -285,7 +494,8 @@ function readerPayload($) {
 function parseChapter(html, seriesSlug, chapterSlug) {
   const $ = cheerio.load(html);
   const payload = readerPayload($);
-  const images = distinct((payload?.sources?.[0]?.images || []).map((url) => ({ url: normalizeImage(url) })), "url").map((item) => item.url);
+  const rawImages = distinct((payload?.sources?.[0]?.images || []).map((url) => ({ url: normalizeImage(url) })), "url").map((item) => item.url);
+  const images = filterRosyDecoys(rawImages);
   if (!images.length) throw new Error("Gambar chapter Josei tidak ditemukan");
   const title = clean($("h1.entry-title,.entry-title").first().text(), clean($("title").text()));
   const match = title.match(/Chapter\s*[\d.]+/i);
@@ -420,23 +630,21 @@ module.exports = function registerJosei(app, { getCache, setCache, coalescedScra
       const imageUrl = normalizeImage(req.query.url);
       const parsed = new URL(imageUrl);
       if (parsed.protocol !== "https:" || !isAllowedImageUrl(parsed)) return res.status(400).send("URL gambar Josei tidak valid");
-      const cached = getImageCache(imageUrl || url);
+      const cacheKey = ROSY_IMG_RE.test(imageUrl) ? `${imageUrl}#wm0` : imageUrl;
+      const cached = getImageCache(cacheKey);
       if (cached) {
         return res.set('Content-Type', cached.contentType).set('Cache-Control', 'public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800').send(cached.buffer);
       }
       const needsProxy = parsed.hostname.toLowerCase().includes("joseiscans.com");
       const targetUrl = needsProxy ? `${PROXY_URL}${encodeURIComponent(imageUrl)}` : imageUrl;
-      const response = await axios.get(targetUrl, { headers: headers(BASE), responseType: "stream", timeout: 25000 });
-      res.set({ "Content-Type": response.headers["content-type"] || "image/jpeg", ...(response.headers["content-length"] ? { "Content-Length": response.headers["content-length"] } : {}), "Cache-Control": "public, max-age=31536000" });
-      const chunks = [];
-      response.data.on('data', c => chunks.push(c));
-      response.data.on('end', () => {
-        const buf = Buffer.concat(chunks);
-        setImageCache(imageUrl || url, buf, response.headers['content-type'] || 'image/jpeg');
-        res.set('Content-Type', response.headers['content-type'] || 'image/jpeg');
-        res.set('Cache-Control', 'public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800');
-        res.send(buf);
-      });
+      const response = await axios.get(targetUrl, { headers: headers(BASE), responseType: "arraybuffer", timeout: 25000 });
+      const rawBuf = Buffer.from(response.data);
+      const rawType = response.headers["content-type"] || "image/jpeg";
+      const { buffer, contentType } = await applyRosyPatches(imageUrl, rawBuf, rawType);
+      setImageCache(cacheKey, buffer, contentType);
+      res.set("Content-Type", contentType);
+      res.set("Cache-Control", "public, max-age=604800, s-maxage=604800, stale-while-revalidate=604800");
+      res.send(buffer);
     } catch (error) {
       console.error(`[Josei Proxy Error] ${error.message}`);
       res.status(error.response?.status || 502).send("Gagal mengambil gambar Josei");
