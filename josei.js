@@ -4,6 +4,10 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 const sharp = require("sharp");
 
+// Matikan cache native libvips + batasi thread agar RSS tidak menumpuk ke batas 1GB PM2.
+sharp.cache(false);
+sharp.concurrency(2);
+
 const BASE = "https://rosyscans.com";
 const PROXY_URL = process.env.JOSEI_PROXY_URL || "https://proxy.kopipaitboskuh.workers.dev/?url=";
 const IMAGE_HOSTS = new Set([
